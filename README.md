@@ -162,3 +162,4 @@ This project is licensed under the MIT License. See the LICENSE file for details
 - [VIP_PlayerParticle](VIPCore/modules/VIP_PlayerParticle/README.md) — selectable particle effect attached to VIP players, fully configurable by the player in the VIP menu
 - [VIP_Postprocessing](VIPCore/modules/VIP_Postprocessing/README.md) — selectable screen post-processing (color grading) for VIP players, fully configurable by the player in the VIP menu
 - [VIP_C4Effect](VIPCore/modules/VIP_C4Effect/README.md) — selectable particle effects for planting and defusing the bomb, fully configurable by the player in the VIP menu
+- [VIP_JoinMessage](VIPCore/modules/VIP_JoinMessage/README.md) — selectable VIP join and leave chat announcements, fully configurable by the player in the VIP menu
