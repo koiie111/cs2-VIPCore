@@ -156,3 +156,4 @@ This project is licensed under the MIT License. See the LICENSE file for details
 ## Modules
 
 - [VIP_KillIcon](VIPCore/modules/VIP_KillIcon/README.md) — custom kill feed icons for VIP killers (headshot, noscope, jumpkill, etc.)
+- [VIP_PlayerTrail](VIPCore/modules/VIP_PlayerTrail/README.md) — beam or particle trail behind VIP players, selectable in the VIP menu
