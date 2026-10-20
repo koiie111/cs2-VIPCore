@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
@@ -15,26 +15,58 @@ public class VIPTag : BasePlugin
 {
     public override string ModuleAuthor => "Toil";
     public override string ModuleName => "[VIP] Tag";
-    public override string ModuleVersion => "v1.1.0";
+    public override string ModuleVersion => "1.3.0-4ill";
 
     private IVipCoreApi? _api;
     private Tag? _tag;
+    private TagColor? _color;
+    private TagColor? _messageColor;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
-    public override void OnAllPluginsLoaded(bool hotReload)
+    public override void Load(bool hotReload) => Server.NextWorldUpdate(Initialize);
+
+    public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
+
+    private void Initialize()
     {
+        if (_api != null) return;
         _api = PluginCapability.Get();
         if (_api == null) return;
+        _api.OnCoreReady += RegisterFeatures;
+        RegisterFeatures();
+    }
 
+    private void RegisterFeatures()
+    {
+        if (_api == null || _tag != null) return;
         _tag = new Tag(this, _api);
-        // Toggle: the player can Enable/Disable the tag from the !vip menu.
+        _color = new TagColor(_api);
+        _messageColor = new TagColor(_api, "TagMessageColor", "4ill_tag_message_color", "Цвет сообщений в чате");
         _api.RegisterFeature(_tag, FeatureType.Toggle);
+        _api.RegisterFeature(_color, FeatureType.Selectable);
+        _api.RegisterFeature(_messageColor, FeatureType.Selectable);
+        // VIPCore builds online users' feature states on authorization, not on module registration.
+        foreach (var player in Utilities.GetPlayers())
+            if (player is { IsValid: true, IsBot: false } && _api.IsClientVip(player))
+                Server.ExecuteCommand($"css_reload_vip_player {player.SteamID}");
     }
 
     public override void Unload(bool hotReload)
     {
-        if (_tag != null) _api?.UnRegisterFeature(_tag);
+        if (_api == null) return;
+        _api.OnCoreReady -= RegisterFeatures;
+        if (_messageColor != null) RemoveFeature(_messageColor);
+        if (_color != null) RemoveFeature(_color);
+        if (_tag != null) RemoveFeature(_tag);
+    }
+
+    private void RemoveFeature(VipFeatureBase feature)
+    {
+        _api!.OnPlayerSpawn -= feature.OnPlayerSpawn;
+        _api.PlayerLoaded -= feature.OnPlayerLoaded;
+        _api.PlayerRemoved -= feature.OnPlayerRemoved;
+        _api.UnRegisterFeature(feature);
     }
 }
 
@@ -65,6 +97,7 @@ public class Tag : VipFeatureBase
     public override string Feature => "Tag";
 
     private readonly VIPTag _plugin;
+    private readonly IVipCoreApi _core;
 
     // Gag/silence sources, auto-detected at load. Any, all, or none may be present.
     private ICS2_SimpleAdminApi? _simpleAdmin;
@@ -74,6 +107,7 @@ public class Tag : VipFeatureBase
     public Tag(VIPTag vipTag, IVipCoreApi api) : base(api)
     {
         _plugin = vipTag;
+        _core = api;
 
         // Standalone chat tag (no ChatManager): own the chat hook and render the coloured line.
         vipTag.AddCommandListener("say", OnSay, HookMode.Pre);
@@ -189,9 +223,21 @@ public class Tag : VipFeatureBase
             return HookResult.Continue;
 
         var team = player.Team;
-        var tagColor = TagColors.ColorChar(tag.ColorTag, team);
-        var nameColor = TagColors.ColorChar(tag.NameColor, team);
-        var msgColor = TagColors.ColorChar(tag.MessageColor, team);
+        var selected = _core.PlayerHasFeature(player, "TagColor")
+            ? GetPlayerCookie<string>(player.SteamID, "4ill_tag_color") : null;
+        // Revalidate saved choices after a downgrade or a palette change.
+        var allowed = _core.PlayerHasFeature(player, "TagColor")
+            ? _core.GetFeatureValue<List<string>>(player, "TagColor") : null;
+        if (selected == null || allowed == null || !allowed.Contains(selected)) selected = null;
+        var tagColor = TagColors.ColorChar(selected ?? tag.ColorTag, team);
+        var nameColor = TagColors.ColorChar(selected ?? tag.NameColor, team);
+        var messagePalette = _core.PlayerHasFeature(player, "TagMessageColor")
+            ? _core.GetFeatureValue<List<string>>(player, "TagMessageColor") : null;
+        var selectedMessage = messagePalette != null
+            ? GetPlayerCookie<string>(player.SteamID, "4ill_tag_message_color") : null;
+        if (selectedMessage == null || messagePalette == null || !messagePalette.Contains(selectedMessage))
+            selectedMessage = null;
+        var msgColor = TagColors.ColorChar(selectedMessage ?? tag.MessageColor, team);
 
         var line = $" {tagColor}{tag.ChatTag} {nameColor}{player.PlayerName}{ChatColors.Default}: {msgColor}{message}";
 
@@ -266,4 +312,46 @@ public class Tag : VipFeatureBase
         }
         return moduleDirectory;
     }
+}
+
+
+/// <summary>Optional premium palette; the separate Tag toggle remains available.</summary>
+public class TagColor(IVipCoreApi api, string feature = "TagColor",
+    string cookieKey = "4ill_tag_color", string title = "Цвет тега и ника в чате") : VipFeatureBase(api)
+{
+    public override string Feature => feature;
+
+    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    {
+        if (!PlayerHasFeature(player)) return;
+        var colors = GetFeatureValue<List<string>>(player);
+        if (colors == null) return;
+        var menu = CreateMenu(title);
+        menu.AddMenuOption("По умолчанию", (controller, _) =>
+        {
+            if (PlayerHasFeature(controller))
+                SetPlayerCookie(controller.SteamID, cookieKey, "");
+        });
+        foreach (var color in colors.Distinct())
+        {
+            menu.AddMenuOption(ColorLabel(color), (controller, _) =>
+            {
+                if (PlayerHasFeature(controller) && GetFeatureValue<List<string>>(controller).Contains(color))
+                    SetPlayerCookie(controller.SteamID, cookieKey, color);
+            });
+        }
+        menu.Open(player);
+    }
+
+    private static string ColorLabel(string color) => color switch
+    {
+        "default" => "Белый", "darkred" => "Тёмно-красный", "green" => "Зелёный",
+        "lightyellow" => "Светло-жёлтый", "lightblue" => "Голубой", "olive" => "Оливковый",
+        "lime" => "Лаймовый", "red" => "Красный", "lightpurple" => "Светло-фиолетовый",
+        "purple" => "Фиолетовый", "grey" => "Серый", "yellow" => "Жёлтый",
+        "gold" => "Золотой", "silver" => "Серебряный", "blue" => "Синий",
+        "darkblue" => "Тёмно-синий", "bluegrey" => "Серо-голубой", "magenta" => "Малиновый",
+        "lightred" => "Светло-красный", "orange" => "Оранжевый", "teamcolor" => "Цвет команды",
+        _ => color
+    };
 }
