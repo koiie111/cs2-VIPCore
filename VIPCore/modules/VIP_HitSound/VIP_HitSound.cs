@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
@@ -72,12 +73,24 @@ public class HitSound : VipFeatureBase
 {
     private const string NormalCookie = "hitsound_normal";
     private const string HeadshotCookie = "hitsound_hs";
+    private const string VolumeCookie = "hitsound_volume";
+    private const string SpectatorsCookie = "hitsound_spectators";
     private const string Off = "off";
+
+    private static readonly int[] VolumeSteps = { 10, 25, 50, 75, 100 };
 
     private static ConVar? _cvFfa;
 
-    // Per-slot selection: null = never chosen (use the default), "off" = disabled, otherwise an entry name.
-    private readonly Dictionary<int, (string? Normal, string? Hs)> _selected = new();
+    private class Prefs
+    {
+        /// <summary>null = never chosen (use the default), "off" = disabled, otherwise an entry name.</summary>
+        public string? Normal;
+        public string? Hs;
+        public int Volume = 100;
+        public bool Spectators = true;
+    }
+
+    private readonly Dictionary<int, Prefs> _prefs = new();
     private bool _stopped;
 
     public override string Feature => "HitSound";
@@ -91,12 +104,12 @@ public class HitSound : VipFeatureBase
     public void Stop()
     {
         _stopped = true;
-        _selected.Clear();
+        _prefs.Clear();
     }
 
-    public override void OnPlayerLoaded(CCSPlayerController player, string group) => _selected.Remove(player.Slot);
+    public override void OnPlayerLoaded(CCSPlayerController player, string group) => _prefs.Remove(player.Slot);
 
-    public override void OnPlayerRemoved(CCSPlayerController player, string group) => _selected.Remove(player.Slot);
+    public override void OnPlayerRemoved(CCSPlayerController player, string group) => _prefs.Remove(player.Slot);
 
     private HookResult OnPlayerHurt(EventPlayerHurt ev, GameEventInfo info)
     {
@@ -121,8 +134,9 @@ public class HitSound : VipFeatureBase
         if (entry == null) return HookResult.Continue;
 
         var listeners = new List<CCSPlayerController> { attacker };
-        AddSpectators(attacker, listeners);
-        Play(attacker, listeners, entry);
+        var prefs = Load(attacker);
+        if (prefs.Spectators) AddSpectators(attacker, listeners);
+        Play(attacker, listeners, entry, prefs.Volume);
 
         return HookResult.Continue;
     }
@@ -136,6 +150,7 @@ public class HitSound : VipFeatureBase
         var entries = TryGetEntries(player);
         if (entries == null) return;
 
+        var prefs = Load(player);
         var menu = CreateMenu(GetTranslatedText(Feature));
 
         if (Category(entries, false).Count > 0)
@@ -144,6 +159,27 @@ public class HitSound : VipFeatureBase
         if (Category(entries, true).Count > 0)
             menu.AddMenuOption(GetTranslatedText("hitsound.Headshot"),
                 (controller, _) => OpenCategory(controller, entries, true));
+
+        // Settings cycle on click and reopen the menu so the new value is shown.
+        menu.AddMenuOption(GetTranslatedText("hitsound.Volume", prefs.Volume), (controller, _) =>
+        {
+            var p = Load(controller);
+            var next = VolumeSteps.FirstOrDefault(v => v > p.Volume);
+            p.Volume = next == 0 ? VolumeSteps[0] : next;
+            SetPlayerCookie(controller.SteamID, VolumeCookie, p.Volume);
+            PlayPreview(controller, entries, p);
+            OnSelectItem(controller, state);
+        });
+
+        menu.AddMenuOption(
+            GetTranslatedText("hitsound.Spectators",
+                GetTranslatedText(prefs.Spectators ? "hitsound.Yes" : "hitsound.No")), (controller, _) =>
+            {
+                var p = Load(controller);
+                p.Spectators = !p.Spectators;
+                SetPlayerCookie(controller.SteamID, SpectatorsCookie, p.Spectators ? 1 : 2);
+                OnSelectItem(controller, state);
+            });
 
         menu.Open(player);
     }
@@ -168,7 +204,7 @@ public class HitSound : VipFeatureBase
             {
                 Save(controller, hs, entry.Name);
                 PrintToChat(controller, GetTranslatedText("hitsound.On", entry.Name));
-                Play(controller, new List<CCSPlayerController> { controller }, entry); // preview
+                Play(controller, new List<CCSPlayerController> { controller }, entry, Load(controller).Volume); // preview
             }, current == entry.Name);
         }
 
@@ -179,26 +215,43 @@ public class HitSound : VipFeatureBase
 
     private void Save(CCSPlayerController player, bool hs, string value)
     {
-        var (normal, headshot) = Load(player);
-        _selected[player.Slot] = hs ? (normal, value) : (value, headshot);
+        var prefs = Load(player);
+        if (hs) prefs.Hs = value;
+        else prefs.Normal = value;
         SetPlayerCookie(player.SteamID, hs ? HeadshotCookie : NormalCookie, value);
     }
 
     private string? Setting(CCSPlayerController player, bool hs)
     {
-        var (normal, headshot) = Load(player);
-        return hs ? headshot : normal;
+        var prefs = Load(player);
+        return hs ? prefs.Hs : prefs.Normal;
     }
 
-    private (string? Normal, string? Hs) Load(CCSPlayerController player)
+    private Prefs Load(CCSPlayerController player)
     {
-        if (_selected.TryGetValue(player.Slot, out var cached)) return cached;
+        if (_prefs.TryGetValue(player.Slot, out var cached)) return cached;
 
         var normal = GetPlayerCookie<string>(player.SteamID, NormalCookie);
         var hs = GetPlayerCookie<string>(player.SteamID, HeadshotCookie);
-        var loaded = (string.IsNullOrEmpty(normal) ? null : normal, string.IsNullOrEmpty(hs) ? null : hs);
-        _selected[player.Slot] = loaded;
+        var volume = GetPlayerCookie<int>(player.SteamID, VolumeCookie);
+        var spectators = GetPlayerCookie<int>(player.SteamID, SpectatorsCookie);
+
+        var loaded = new Prefs
+        {
+            Normal = string.IsNullOrEmpty(normal) ? null : normal,
+            Hs = string.IsNullOrEmpty(hs) ? null : hs,
+            Volume = VolumeSteps.Contains(volume) ? volume : 100,
+            Spectators = spectators != 2
+        };
+        _prefs[player.Slot] = loaded;
         return loaded;
+    }
+
+    /// <summary>Plays the sound the player would hear on a normal hit, so a volume change can be judged by ear.</summary>
+    private void PlayPreview(CCSPlayerController player, List<HitSoundEntry> entries, Prefs prefs)
+    {
+        var entry = Pick(player, entries, false) ?? Pick(player, entries, true);
+        if (entry != null) Play(player, new List<CCSPlayerController> { player }, entry, prefs.Volume);
     }
 
     /// <summary>
@@ -253,9 +306,12 @@ public class HitSound : VipFeatureBase
         }
     }
 
-    private static void Play(CCSPlayerController source, List<CCSPlayerController> listeners, HitSoundEntry entry)
+    /// <param name="percent">The player's own volume setting, multiplied with the entry volume.</param>
+    private static void Play(CCSPlayerController source, List<CCSPlayerController> listeners, HitSoundEntry entry,
+        int percent)
     {
-        if (entry.Volume <= 0f) return;
+        var volume = entry.Volume * percent / 100f;
+        if (volume <= 0f) return;
 
         if (entry.Emit.Length > 0)
         {
@@ -265,11 +321,12 @@ public class HitSound : VipFeatureBase
             foreach (var listener in listeners)
                 filter.Add(listener);
 
-            source.EmitSound(entry.Emit, filter, entry.Volume);
+            source.EmitSound(entry.Emit, filter, volume);
             return;
         }
 
+        var command = $"playvol {entry.Path} {Math.Clamp(volume, 0f, 1f).ToString("0.##", CultureInfo.InvariantCulture)}";
         foreach (var listener in listeners)
-            listener.ExecuteClientCommand($"play {entry.Path}");
+            listener.ExecuteClientCommand(command);
     }
 }
