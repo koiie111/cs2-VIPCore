@@ -27,21 +27,50 @@
       "Values": {
         "HitMarker": [
           {
-            "name": "Cross",
-            "particle": "particles/hitmarker/cross.vpcf",
-            "headshot": "particles/hitmarker/cross_hs.vpcf",
+            "name": "Impact",
+            "particle": "particles/impact_fx/impact_hit_effect.vpcf",
+            "headshot": "particles/impact_fx/impact_hit_effect_kill.vpcf",
+            "duration": 0.25,
+            "distance": 60
+          }
+        ]
+      }
+    },
+    "VIP2": {
+      "Values": {
+        "HitMarker": [
+          {
+            "name": "Impact",
+            "particle": "particles/impact_fx/impact_hit_effect.vpcf",
+            "headshot": "particles/impact_fx/impact_hit_effect_kill.vpcf",
             "duration": 0.25,
             "distance": 60,
             "offset_x": 0,
             "offset_y": 0
           },
-          { "name": "Dot", "particle": "particles/hitmarker/dot.vpcf" }
+          {
+            "name": "Cross",
+            "particle": "particles/hitmarker/cross.vpcf",
+            "headshot": "particles/hitmarker/cross_hs.vpcf",
+            "duration": 0.3,
+            "distance": 80,
+            "offset_x": 0,
+            "offset_y": 5
+          },
+          {
+            "name": "Screen",
+            "particle": "particles/hitmarker/screen_flash.vpcf",
+            "duration": 0.2,
+            "distance": 0
+          }
         ]
       }
     }
   }
 }
 ```
+
+Пути в примере — условные: `Impact` повторяет пример из оригинального плагина, а `Cross` и `Screen` — заглушки. Подставьте частицы, которые реально есть в вашем аддоне. Разные группы могут иметь разные наборы маркеров. `distance: 0` подходит для частиц, собранных как экранный эффект: они рисуются прямо на экране и расстояние игнорируют; чем больше расстояние для обычной частицы, тем крупнее она выглядит.
 
 Имена полей — строго в нижнем регистре.
 
@@ -66,7 +95,7 @@
 | Маркер: имя | открывает список маркеров группы + «Выключить»; при выборе сразу показывает предпросмотр |
 | Маркер на хедшот: Да/Нет | включает/выключает отдельную частицу для хедшота (показывается, если в группе есть `headshot`) |
 | Длительность: N с | по клику переключает 0.1 → 0.15 → 0.25 → 0.4 → 0.6 → 1.0 с |
-| Положение | подменю: расстояние (30–160), сдвиг по горизонтали и по вертикали (−40…40, шаг 10), «Сбросить положение» к значениям из конфига |
+| Положение | подменю: расстояние (0–160; 0 — для экранных частиц), сдвиг по горизонтали и по вертикали (−40…40, шаг 10), «Сбросить положение» к значениям из конфига |
 | Видят наблюдатели: Да/Нет | показывать ли маркер наблюдателям, которые смотрят за вами |
 | Предпросмотр | показывает маркер с текущими настройками |
 

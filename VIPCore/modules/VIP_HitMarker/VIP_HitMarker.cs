@@ -136,7 +136,7 @@ public class HitMarker : VipFeatureBase
     private const int MaxPlayers = 64;
 
     private static readonly float[] DurationSteps = { 0.1f, 0.15f, 0.25f, 0.4f, 0.6f, 1f };
-    private static readonly float[] DistanceSteps = { 30f, 45f, 60f, 80f, 100f, 130f, 160f };
+    private static readonly float[] DistanceSteps = { 0f, 30f, 45f, 60f, 80f, 100f, 130f, 160f };
     private static readonly float[] OffsetSteps = { -40f, -30f, -20f, -10f, 0f, 10f, 20f, 30f, 40f };
 
     private static ConVar? _cvFfa;
