@@ -16,7 +16,7 @@ public class VipPlayerTrail : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Trail";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleDescription => "Draws a beam or particle trail behind VIP players";
 
     private PlayerTrail? _trail;
@@ -127,6 +127,8 @@ public class PlayerTrail : VipFeatureBase
 {
     public const string FeatureName = "PlayerTrail";
     private const string CookieKey = "player_trail";
+    private const string MineCookieKey = "player_trail_mine";
+    private const string OthersCookieKey = "player_trail_others";
     private const string Off = "off";
     private const char ParticleMarker = '@';
     private const string BeamSprite = "materials/sprites/laserbeam.vmat";
@@ -155,12 +157,26 @@ public class PlayerTrail : VipFeatureBase
             MathF.Sqrt((X - o.X) * (X - o.X) + (Y - o.Y) * (Y - o.Y) + (Z - o.Z) * (Z - o.Z));
     }
 
+    /// <summary>Who may see the owner's trail ("Мой след видят").</summary>
+    private enum MineMode { All, Team, Self }
+
+    /// <summary>Whose trails a viewer receives ("Чужие следы"); the viewer's own trail is always shown.</summary>
+    private enum OthersMode { All, Team, None }
+
     public override string Feature => FeatureName;
 
     private readonly BasePlugin _plugin;
     private readonly TrailState?[] _states = new TrailState?[65];
     private readonly string?[] _selected = new string?[65];
+    private readonly MineMode[] _mine = new MineMode[65];
+    private readonly OthersMode[] _others = new OthersMode[65];
     private readonly Color[] _roundColors = new Color[65];
+
+    // Trail entities (beams, tracers, carried particles) by owner slot, for per-viewer transmit filtering.
+    private readonly HashSet<uint>?[] _entities = new HashSet<uint>?[65];
+    private readonly Dictionary<uint, int> _entityOwner = new();
+    private readonly int[] _team = new int[65];
+
     private int _tick;
     private bool _stopped;
 
@@ -170,11 +186,19 @@ public class PlayerTrail : VipFeatureBase
         RollRoundColors();
 
         plugin.RegisterListener<Listeners.OnTick>(OnTick);
-        plugin.RegisterListener<Listeners.OnMapStart>(_ => Array.Clear(_states));
+        plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        plugin.RegisterListener<Listeners.OnEntityDeleted>(entity => Untrack(entity.Index));
+        plugin.RegisterListener<Listeners.OnMapStart>(_ =>
+        {
+            Array.Clear(_states);
+            ClearTracked();
+        });
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
             Remove(slot);
             _selected[slot] = null;
+            _mine[slot] = MineMode.All;
+            _others[slot] = OthersMode.All;
         });
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
@@ -239,6 +263,27 @@ public class PlayerTrail : VipFeatureBase
         var current = CurrentValue(player, cfg);
         var menu = CreateMenu(GetTranslatedText(Feature));
 
+        // Visibility settings cycle on click and reopen the menu so the new value is shown.
+        var others = _others[player.Slot];
+        menu.AddMenuOption(GetTranslatedText("playertrail.Others", GetTranslatedText($"playertrail.others.{others}")),
+            (controller, _) =>
+            {
+                var next = (OthersMode)(((int)others + 1) % 3);
+                _others[controller.Slot] = next;
+                SetPlayerCookie(controller.SteamID, OthersCookieKey, (int)next);
+                OnSelectItem(controller, state);
+            });
+
+        var mine = _mine[player.Slot];
+        menu.AddMenuOption(GetTranslatedText("playertrail.Mine", GetTranslatedText($"playertrail.mine.{mine}")),
+            (controller, _) =>
+            {
+                var next = (MineMode)(((int)mine + 1) % 3);
+                _mine[controller.Slot] = next;
+                SetPlayerCookie(controller.SteamID, MineCookieKey, (int)next);
+                OnSelectItem(controller, state);
+            });
+
         menu.AddMenuOption(GetTranslatedText("playertrail.Disable"), (controller, _) =>
         {
             Select(controller, Off);
@@ -269,6 +314,12 @@ public class PlayerTrail : VipFeatureBase
     {
         var cookie = GetPlayerCookie<string>(player.SteamID, CookieKey);
         _selected[player.Slot] = string.IsNullOrEmpty(cookie) ? null : cookie;
+
+        var mine = GetPlayerCookie<int>(player.SteamID, MineCookieKey);
+        _mine[player.Slot] = Enum.IsDefined((MineMode)mine) ? (MineMode)mine : MineMode.All;
+
+        var others = GetPlayerCookie<int>(player.SteamID, OthersCookieKey);
+        _others[player.Slot] = Enum.IsDefined((OthersMode)others) ? (OthersMode)others : OthersMode.All;
     }
 
     /// <summary>Menu entries available to the player's group: beam colors first, then particles.</summary>
@@ -348,7 +399,7 @@ public class PlayerTrail : VipFeatureBase
             if (state.Particle == null) return;
 
             if (state.Particle.Follow)
-                state.Carried = Carry(pawn, state.Particle);
+                state.Carried = Carry(pawn, state.Particle, player.Slot);
         }
 
         _states[player.Slot] = state;
@@ -413,7 +464,7 @@ public class PlayerTrail : VipFeatureBase
                 if (state.Particle != null)
                 {
                     var offset = state.Particle.Offset;
-                    Tracer(new Vector(last.X, last.Y, last.Z + offset),
+                    Tracer(slot, new Vector(last.X, last.Y, last.Z + offset),
                         new Vector(origin.X, origin.Y, origin.Z + offset), state.Particle, state.Config.Lifetime);
                 }
                 else
@@ -421,13 +472,86 @@ public class PlayerTrail : VipFeatureBase
                     var color = state.Value.Equals("random", StringComparison.OrdinalIgnoreCase)
                         ? _roundColors[slot]
                         : ResolveColor(state.Value);
-                    CreateBeam(new Vector(origin.X, origin.Y, origin.Z), new Vector(last.X, last.Y, last.Z), color,
-                        state.Config.Width, state.Config.Lifetime);
+                    CreateBeam(slot, new Vector(origin.X, origin.Y, origin.Z), new Vector(last.X, last.Y, last.Z),
+                        color, state.Config.Width, state.Config.Lifetime);
                 }
             }
 
             state.Last = origin;
         }
+    }
+
+    private void Track(int owner, uint index)
+    {
+        if (_entityOwner.Remove(index, out var old))
+            _entities[old]?.Remove(index);
+
+        _entityOwner[index] = owner;
+        (_entities[owner] ??= new HashSet<uint>()).Add(index);
+    }
+
+    private void Untrack(uint index)
+    {
+        if (_entityOwner.Count > 0 && _entityOwner.Remove(index, out var owner))
+            _entities[owner]?.Remove(index);
+    }
+
+    private void ClearTracked()
+    {
+        _entityOwner.Clear();
+        foreach (var set in _entities)
+            set?.Clear();
+    }
+
+    /// <summary>Strips trail entities from each viewer's snapshot according to both visibility settings.</summary>
+    private void OnCheckTransmit(CCheckTransmitInfoList infoList)
+    {
+        if (_stopped || _entityOwner.Count == 0) return;
+
+        var restricted = false;
+        for (var slot = 0; slot < _mine.Length && !restricted; slot++)
+            restricted = _mine[slot] != MineMode.All || _others[slot] != OthersMode.All;
+        if (!restricted) return;
+
+        Array.Clear(_team);
+        foreach (var player in Utilities.GetPlayers())
+            if (player.Slot < _team.Length)
+                _team[player.Slot] = player.TeamNum;
+
+        foreach (var (info, viewer) in infoList)
+        {
+            if (viewer is not { IsValid: true } || viewer.Slot >= _team.Length) continue;
+
+            var viewerSlot = viewer.Slot;
+            for (var owner = 0; owner < _entities.Length; owner++)
+            {
+                var set = _entities[owner];
+                if (set is not { Count: > 0 } || owner == viewerSlot) continue;
+                if (CanSee(owner, viewerSlot)) continue;
+
+                foreach (var index in set)
+                    info.TransmitEntities.Remove((int)index);
+            }
+        }
+    }
+
+    private bool CanSee(int owner, int viewer)
+    {
+        var sameTeam = _team[owner] > 1 && _team[owner] == _team[viewer];
+
+        var ownerAllows = _mine[owner] switch
+        {
+            MineMode.Team => sameTeam,
+            MineMode.Self => false,
+            _ => true
+        };
+
+        return ownerAllows && _others[viewer] switch
+        {
+            OthersMode.Team => sameTeam,
+            OthersMode.None => false,
+            _ => true
+        };
     }
 
     private void RollRoundColors()
@@ -436,10 +560,12 @@ public class PlayerTrail : VipFeatureBase
             _roundColors[i] = FromHue(Random.Shared.NextDouble() * 360.0);
     }
 
-    private void CreateBeam(Vector from, Vector to, Color color, float width, float lifetime)
+    private void CreateBeam(int owner, Vector from, Vector to, Color color, float width, float lifetime)
     {
         var beam = Utilities.CreateEntityByName<CEnvBeam>("env_beam");
         if (beam == null || !beam.IsValid) return;
+
+        Track(owner, beam.Index);
 
         beam.Width = width;
         beam.Render = color;
@@ -457,10 +583,12 @@ public class PlayerTrail : VipFeatureBase
         }, TimerFlags.STOP_ON_MAPCHANGE);
     }
 
-    private void Tracer(Vector start, Vector end, ParticleEntry entry, float lifetime)
+    private void Tracer(int owner, Vector start, Vector end, ParticleEntry entry, float lifetime)
     {
         var particle = CreateParticle(entry, start, Aim(start, end));
         if (particle == null) return;
+
+        Track(owner, particle.Index);
 
         particle.DispatchSpawn();
 
@@ -481,13 +609,15 @@ public class PlayerTrail : VipFeatureBase
         }, TimerFlags.STOP_ON_MAPCHANGE);
     }
 
-    private static CParticleSystem? Carry(CBaseEntity owner, ParticleEntry entry)
+    private CParticleSystem? Carry(CBaseEntity pawn, ParticleEntry entry, int owner)
     {
-        var origin = owner.AbsOrigin;
+        var origin = pawn.AbsOrigin;
         if (origin == null) return null;
 
         var particle = CreateParticle(entry, new Vector(origin.X, origin.Y, origin.Z + entry.Offset), ZeroAngle);
         if (particle == null) return null;
+
+        Track(owner, particle.Index);
 
         particle.DispatchSpawn();
         particle.AcceptInput("Start");
