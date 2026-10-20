@@ -1,131 +1,104 @@
-using System.Text.Json.Serialization;
+using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
+using Microsoft.Extensions.Logging;
 using VipCoreApi;
+using static VipCoreApi.IVipCoreApi;
 
 namespace VIP_KillIcon;
 
 public class VipKillIcon : BasePlugin
 {
-    public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
-    public override string ModuleName => "[VIP] Kill Icon";
+    public override string ModuleName => "[VIP] KillIcon";
+    public override string ModuleAuthor => "4ill (inspired by ByDexterTR KillIcon)";
     public override string ModuleVersion => "1.0.0";
-    public override string ModuleDescription => "Replaces the kill feed weapon icon for VIP killers depending on how the kill happened";
-
-    private KillIcon? _killIcon;
+    private readonly PluginCapability<IVipCoreApi> _capability = new("vipcore:core");
     private IVipCoreApi? _api;
+    private KillIcon? _feature;
+    private bool _unloaded;
 
-    private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
-
-    public override void OnAllPluginsLoaded(bool hotReload)
+    public override void Load(bool hotReload) => Server.NextWorldUpdate(Initialize);
+    public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
+    private void Initialize()
     {
-        _api = PluginCapability.Get();
+        if (_unloaded || _api != null) return;
+        _api = _capability.Get();
         if (_api == null) return;
-
-        _api.OnCoreReady += () =>
-        {
-            _killIcon = new KillIcon(this, _api);
-            _api.RegisterFeature(_killIcon);
-        };
+        _api.OnCoreReady += Register;
+        Register();
     }
-
+    private void Register()
+    {
+        if (_unloaded || _api == null || _feature != null) return;
+        _feature = new KillIcon(this, _api);
+        _api.RegisterFeature(_feature, FeatureType.Selectable);
+        foreach (var player in Utilities.GetPlayers())
+            if (player is { IsValid: true, IsBot: false } && _api.IsClientVip(player))
+                Server.ExecuteCommand($"css_reload_vip_player {player.SteamID}");
+        Logger.LogInformation("KillIcon registered with player selection");
+    }
     public override void Unload(bool hotReload)
     {
-        if (_api != null && _killIcon != null)
-            _api.UnRegisterFeature(_killIcon);
+        _unloaded = true;
+        if (_api == null) return;
+        _api.OnCoreReady -= Register;
+        if (_feature == null) return;
+        _api.OnPlayerSpawn -= _feature.OnPlayerSpawn;
+        _api.PlayerLoaded -= _feature.OnPlayerLoaded;
+        _api.PlayerRemoved -= _feature.OnPlayerRemoved;
+        _api.UnRegisterFeature(_feature);
+        _feature = null;
     }
-}
-
-public class KillIconConfig
-{
-    [JsonPropertyName("headshot")] public string Headshot { get; set; } = "";
-    [JsonPropertyName("penetrated")] public string Penetrated { get; set; } = "";
-    [JsonPropertyName("noscope")] public string NoScope { get; set; } = "";
-    [JsonPropertyName("throughsmoke")] public string ThroughSmoke { get; set; } = "";
-    [JsonPropertyName("blindkill")] public string BlindKill { get; set; } = "";
-    [JsonPropertyName("assistflash")] public string AssistFlash { get; set; } = "";
-    [JsonPropertyName("jumpkill")] public string JumpKill { get; set; } = "";
-    [JsonPropertyName("dominated")] public string Dominated { get; set; } = "";
-    [JsonPropertyName("squadwipe")] public string SquadWipe { get; set; } = "";
-
-    /// <summary>Per-weapon replacement: original weapon name (with or without "weapon_") -> icon name.</summary>
-    [JsonPropertyName("weapons")] public Dictionary<string, string> Weapons { get; set; } = new();
 }
 
 public class KillIcon : VipFeatureBase
 {
-    private const uint FlagOnGround = 1u << 0; // FL_ONGROUND
-
     public override string Feature => "KillIcon";
-
-    public KillIcon(VipKillIcon plugin, IVipCoreApi api) : base(api)
+    private const string Cookie = "4ill_kill_icon";
+    // Real weapon names accepted by CS2's player_death death notice renderer.
+    public static readonly Dictionary<string, string> Icons = new()
     {
-        plugin.RegisterEventHandler<EventPlayerDeath>(OnPlayerDeath, HookMode.Pre);
+        ["knife"] = "Нож", ["taser"] = "Zeus", ["hegrenade"] = "Граната HE",
+        ["inferno"] = "Огонь", ["awp"] = "AWP", ["ak47"] = "AK-47",
+        ["m4a1"] = "M4A4", ["m4a1_silencer"] = "M4A1-S", ["deagle"] = "Desert Eagle",
+        ["ssg08"] = "SSG 08", ["p90"] = "P90", ["negev"] = "Negev"
+    };
+    public KillIcon(BasePlugin plugin, IVipCoreApi api) : base(api) =>
+        plugin.RegisterEventHandler<EventPlayerDeath>(OnDeath, HookMode.Pre);
+
+    private bool Allowed(CCSPlayerController player) => player.IsValid && !player.IsBot
+        && IsClientVip(player) && PlayerHasFeature(player)
+        && GetPlayerFeatureState(player) == FeatureState.Enabled;
+    private List<string> Choices(CCSPlayerController player) =>
+        GetFeatureValue<List<string>>(player) ?? new();
+
+    public override void OnSelectItem(CCSPlayerController player, FeatureState state)
+    {
+        if (!Allowed(player)) return;
+        var menu = CreateMenu("Иконка убийства");
+        var current = GetPlayerCookie<string>(player.SteamID, Cookie) ?? "";
+        menu.AddMenuOption((current.Length == 0 ? "✓ " : "") + "Стандартная (по оружию)",
+            (controller, _) => Select(controller, ""));
+        foreach (var icon in Choices(player).Distinct().Where(Icons.ContainsKey))
+            menu.AddMenuOption((current == icon ? "✓ " : "") + Icons[icon],
+                (controller, _) => Select(controller, icon));
+        menu.Open(player);
     }
-
-    private HookResult OnPlayerDeath(EventPlayerDeath @event, GameEventInfo info)
+    private void Select(CCSPlayerController player, string icon)
     {
-        var attacker = @event.Attacker;
-        var victim = @event.Userid;
-
-        if (attacker is null || !attacker.IsValid || victim is null || !victim.IsValid)
+        if (!Allowed(player) || (icon.Length > 0 && (!Icons.ContainsKey(icon) || !Choices(player).Contains(icon)))) return;
+        SetPlayerCookie(player.SteamID, Cookie, icon);
+        PrintToChat(player, "Иконка убийства: " + (icon.Length == 0 ? "стандартная" : Icons[icon]));
+    }
+    private HookResult OnDeath(EventPlayerDeath ev, GameEventInfo info)
+    {
+        var attacker = ev.Attacker;
+        var victim = ev.Userid;
+        if (attacker == null || victim == null || !victim.IsValid || attacker.Slot == victim.Slot || !Allowed(attacker))
             return HookResult.Continue;
-        if (attacker.Slot == victim.Slot) return HookResult.Continue;
-
-        if (!IsClientVip(attacker) || !PlayerHasFeature(attacker)) return HookResult.Continue;
-        if (GetPlayerFeatureState(attacker) is not IVipCoreApi.FeatureState.Enabled) return HookResult.Continue;
-
-        KillIconConfig cfg;
-        try
-        {
-            cfg = GetFeatureValue<KillIconConfig>(attacker);
-        }
-        catch (Exception)
-        {
-            return HookResult.Continue;
-        }
-
-        var icon = PickIcon(cfg, @event, attacker, victim);
-        if (icon.Length > 0)
-            @event.Weapon = icon;
-
+        var icon = GetPlayerCookie<string>(attacker.SteamID, Cookie);
+        if (!string.IsNullOrEmpty(icon) && Icons.ContainsKey(icon) && Choices(attacker).Contains(icon))
+            ev.Weapon = icon;
         return HookResult.Continue;
-    }
-
-    private static string PickIcon(KillIconConfig cfg, EventPlayerDeath ev, CCSPlayerController attacker,
-        CCSPlayerController victim)
-    {
-        if (cfg.SquadWipe.Length > 0 && SquadWiped(victim)) return cfg.SquadWipe;
-        if (cfg.Dominated.Length > 0 && ev.Dominated > 0) return cfg.Dominated;
-        if (cfg.JumpKill.Length > 0 && InAir(attacker)) return cfg.JumpKill;
-        if (cfg.BlindKill.Length > 0 && ev.Attackerblind) return cfg.BlindKill;
-        if (cfg.AssistFlash.Length > 0 && ev.Assistedflash) return cfg.AssistFlash;
-        if (cfg.NoScope.Length > 0 && ev.Noscope) return cfg.NoScope;
-        if (cfg.ThroughSmoke.Length > 0 && ev.Thrusmoke) return cfg.ThroughSmoke;
-        if (cfg.Penetrated.Length > 0 && ev.Penetrated > 0) return cfg.Penetrated;
-        if (cfg.Headshot.Length > 0 && ev.Headshot) return cfg.Headshot;
-
-        if (cfg.Weapons.Count == 0 || string.IsNullOrEmpty(ev.Weapon)) return "";
-
-        if (cfg.Weapons.TryGetValue(ev.Weapon, out var byName) && byName.Length > 0) return byName;
-        return cfg.Weapons.TryGetValue("weapon_" + ev.Weapon, out var prefixed) ? prefixed : "";
-    }
-
-    private static bool InAir(CCSPlayerController attacker)
-    {
-        var pawn = attacker.PlayerPawn.Value;
-        return pawn is { IsValid: true } && (pawn.Flags & FlagOnGround) == 0;
-    }
-
-    /// <summary>True when the victim was the last living player of their team.</summary>
-    private static bool SquadWiped(CCSPlayerController victim)
-    {
-        foreach (var mate in CounterStrikeSharp.API.Utilities.GetPlayers())
-        {
-            if (!mate.IsValid || mate.Slot == victim.Slot) continue;
-            if (mate.Team == victim.Team && mate.PawnIsAlive) return false;
-        }
-
-        return true;
     }
 }

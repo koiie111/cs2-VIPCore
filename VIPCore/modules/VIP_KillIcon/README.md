@@ -1,70 +1,12 @@
-# VIP_KillIcon
+# KillIcon for 4ill VIPCore
 
-Заменяет иконку оружия в килфиде (kill feed) для VIP-игрока, который совершил убийство, в зависимости от того, *как* оно было совершено: хедшот, без прицела, через дым, в прыжке и т.д.
+Inspired by https://github.com/ByDexterTR/CS2Plugins/blob/main/VIPCore/modules/KillIcon.cs.
+Standalone module for the VipCoreApi capability used by this fork. Does not replace VIPCore.
 
-Порт модуля `KillIcon` из [ByDexterTR/CS2Plugins](https://github.com/ByDexterTR/CS2Plugins/blob/main/VIPCore/modules/KillIcon.cs) под API этого ядра (`VipFeatureBase`, `vipcore:core`).
+Add `"KillIcon": ["knife", "taser", "hegrenade", "inferno", "awp", "ak47", "m4a1", "m4a1_silencer", "deagle", "ssg08", "p90", "negev"]` to eligible groups' Values in vip.json.
+Omit the KillIcon key in groups without access. Add `"KillIcon": "Иконка убийства"` to VIPCore/lang/ru.json and en.json.
+The selectable !vip item offers the allowed icons and a standard weapon option (the default).
+Choice uses VIPCore's persistent player cookies. Access and the allowed list are checked again on every selection and kill.
+Only the death notice weapon field changes; damage, headshots, assists and other event fields are preserved. Other plugins reading player_death after this pre-hook will also see the selected weapon name.
 
-## Установка
-
-1. Соберите модуль вместе с остальными (CI кладёт его в `VIP_Modules.zip`) или вручную:
-   ```bash
-   dotnet publish VIPCore/modules/VIP_KillIcon/VIP_KillIcon.csproj -c Release
-   ```
-2. Скопируйте папку `VIP_KillIcon` в `addons/counterstrikesharp/plugins/` (рядом с `VIPCore`).
-3. Добавьте фичу `KillIcon` в нужные группы `vip.json` (см. ниже) и выполните `css_vip_reload` либо перезапустите сервер.
-
-Название пункта в `!vip` берётся из `lang/*.json` ядра (ключ `KillIcon`). Игрок может включать и выключать фичу в меню.
-
-## Конфиг (`vip.json`)
-
-```json
-{
-  "Groups": {
-    "VIP1": {
-      "Values": {
-        "KillIcon": {
-          "headshot": "",
-          "penetrated": "",
-          "noscope": "",
-          "throughsmoke": "",
-          "blindkill": "",
-          "assistflash": "",
-          "jumpkill": "",
-          "dominated": "",
-          "squadwipe": "",
-          "weapons": {
-            "ak47": "awp",
-            "weapon_knife": "hegrenade"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-Все поля необязательны; пустая строка или отсутствие поля отключает правило. Имена полей — строго в нижнем регистре.
-
-| Поле | Условие |
-|------|---------|
-| `squadwipe` | жертва была последним живым игроком своей команды |
-| `dominated` | убийство установило доминирование над жертвой |
-| `jumpkill` | убийца находился в воздухе |
-| `blindkill` | убийца был ослеплён |
-| `assistflash` | ассист флешкой |
-| `noscope` | убийство без прицела (снайперкой) |
-| `throughsmoke` | через дым |
-| `penetrated` | через стену/объект |
-| `headshot` | хедшот |
-| `weapons` | замена по оружию: ключ — имя оружия из события (`ak47` или `weapon_ak47`), значение — имя иконки |
-
-### Приоритет
-
-Применяется первое сработавшее правило, в порядке: `squadwipe` → `dominated` → `jumpkill` → `blindkill` → `assistflash` → `noscope` → `throughsmoke` → `penetrated` → `headshot` → `weapons`.
-
-Самоубийства и убийства без валидного убийцы не затрагиваются. Работает только пока у убийцы фича включена (`Enabled`).
-
-## Важно
-
-- Значение — это **имя иконки оружия**, которое клиент ищет в своём HUD-наборе (например, `knife`, `awp`, `hegrenade`, `inferno`). Если иконки с таким именем нет, в килфиде ничего не отобразится. Для собственных иконок нужен клиентский ресурс (например, Workshop-аддон).
-- Модуль меняет поле `weapon` события `player_death` до рассылки клиентам (`HookMode.Pre`). Другие плагины, которые читают `weapon` этого же события после него, увидят подменённое значение; статистика (ранги, `sa_*`) на это может реагировать. Проверьте на своих плагинах.
+Build with `dotnet build VIP_KillIcon.csproj -c Release`. Deploy only VIP_KillIcon.dll and its deps.json/PDB into plugins/VIP_KillIcon; the shared VipCoreApi and CounterStrikeSharp runtime must already exist.
