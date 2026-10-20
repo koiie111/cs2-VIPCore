@@ -1,18 +1,34 @@
-# Adds the ability to regenerate the health of a VIP player
+# VIP health regeneration
 
-# Config
+Add `HealthRegen` only to the VIP groups that should receive this feature.
+For example, put this in the `PREMIUM.Values` object in `vip.json`:
 
-### in vip.json
 ```json
-"HealthRegen": { 
-	"Health": 10,  	//The number of health units per interval
-	"Delay": 5,		//Delay before starting recovery (in seconds)
-	"Interval": 5 	//Interval between health regeneration (in seconds)
-},
+"HealthRegen": {
+  "Health": 1,
+  "Delay": 8,
+  "Interval": 1
+}
 ```
 
-# in lang (not necessarily)
+`Health` is the HP restored per tick, `Delay` is the time since the latest health
+damage, and `Interval` is the time between subsequent heals (all times in seconds).
+The example restores the first HP after eight seconds without damage, followed
+by one HP each second, up to the player's maximum health. Every new health hit
+restarts the full delay. Fractional times are supported with a 0.1-second polling
+resolution. Server stalls do not cause catch-up healing bursts.
 
-RU: `"HealthRegen": "Регенерация здоровья"`
+The module supports loading on a running server. Reload VIPCore configuration
+with `css_vip_reload` after editing `vip.json`, then load this module with
+`css_plugins load VIP_RegenHealth`. No game-server restart is required.
 
-EN: `"HealthRegen": "Health Regeneration"`
+Optional VIPCore language entries:
+
+- RU: `"HealthRegen": "Регенерация здоровья"`
+- EN: `"HealthRegen": "Health Regeneration"`
+
+Run the deterministic timing regression checks from the repository root:
+
+```sh
+dotnet run --project VIPCore/tests/VIP_RegenHealth.ScheduleTests -c Release
+```
