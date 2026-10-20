@@ -85,7 +85,7 @@ Add `TagMessageColor` to PREMIUM's `Values` using the same 15-color plus `teamco
 as `TagColor`. This opens a separate `Р¦РІРµС‚ СЃРѕРѕР±С‰РµРЅРёР№ РІ С‡Р°С‚Рµ` menu in `!vip`. It stores its own
 VIPCore cookie and does not change the prefix/name color. Both menus offer `РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ`.
 
-For VIP, omit `TagMessageColor` and keep `Tag.MessageColor` as `default` (white).
+For VIP, omit `TagMessageColor` and set `Tag.MessageColor` to `blue` (fixed blue messages).
 A former PREMIUM player's saved message color is ignored immediately after downgrade.
 Add `"TagMessageColor": "Р¦РІРµС‚ СЃРѕРѕР±С‰РµРЅРёР№ РІ С‡Р°С‚Рµ"` to VIPCore's language files.
 
