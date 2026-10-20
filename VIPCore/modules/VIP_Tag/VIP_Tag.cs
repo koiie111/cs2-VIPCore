@@ -15,11 +15,12 @@ public class VIPTag : BasePlugin
 {
     public override string ModuleAuthor => "Toil";
     public override string ModuleName => "[VIP] Tag";
-    public override string ModuleVersion => "1.2.0-4ill";
+    public override string ModuleVersion => "1.3.0-4ill";
 
     private IVipCoreApi? _api;
     private Tag? _tag;
     private TagColor? _color;
+    private TagColor? _messageColor;
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -41,8 +42,10 @@ public class VIPTag : BasePlugin
         if (_api == null || _tag != null) return;
         _tag = new Tag(this, _api);
         _color = new TagColor(_api);
+        _messageColor = new TagColor(_api, "TagMessageColor", "4ill_tag_message_color", "Цвет сообщений в чате");
         _api.RegisterFeature(_tag, FeatureType.Toggle);
         _api.RegisterFeature(_color, FeatureType.Selectable);
+        _api.RegisterFeature(_messageColor, FeatureType.Selectable);
         // VIPCore builds online users' feature states on authorization, not on module registration.
         foreach (var player in Utilities.GetPlayers())
             if (player is { IsValid: true, IsBot: false } && _api.IsClientVip(player))
@@ -53,6 +56,7 @@ public class VIPTag : BasePlugin
     {
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeatures;
+        if (_messageColor != null) RemoveFeature(_messageColor);
         if (_color != null) RemoveFeature(_color);
         if (_tag != null) RemoveFeature(_tag);
     }
@@ -227,7 +231,13 @@ public class Tag : VipFeatureBase
         if (selected == null || allowed == null || !allowed.Contains(selected)) selected = null;
         var tagColor = TagColors.ColorChar(selected ?? tag.ColorTag, team);
         var nameColor = TagColors.ColorChar(selected ?? tag.NameColor, team);
-        var msgColor = TagColors.ColorChar(tag.MessageColor, team);
+        var messagePalette = _core.PlayerHasFeature(player, "TagMessageColor")
+            ? _core.GetFeatureValue<List<string>>(player, "TagMessageColor") : null;
+        var selectedMessage = messagePalette != null
+            ? GetPlayerCookie<string>(player.SteamID, "4ill_tag_message_color") : null;
+        if (selectedMessage == null || messagePalette == null || !messagePalette.Contains(selectedMessage))
+            selectedMessage = null;
+        var msgColor = TagColors.ColorChar(selectedMessage ?? tag.MessageColor, team);
 
         var line = $" {tagColor}{tag.ChatTag} {nameColor}{player.PlayerName}{ChatColors.Default}: {msgColor}{message}";
 
@@ -306,27 +316,28 @@ public class Tag : VipFeatureBase
 
 
 /// <summary>Optional premium palette; the separate Tag toggle remains available.</summary>
-public class TagColor(IVipCoreApi api) : VipFeatureBase(api)
+public class TagColor(IVipCoreApi api, string feature = "TagColor",
+    string cookieKey = "4ill_tag_color", string title = "Цвет тега и ника в чате") : VipFeatureBase(api)
 {
-    public override string Feature => "TagColor";
+    public override string Feature => feature;
 
     public override void OnSelectItem(CCSPlayerController player, FeatureState state)
     {
         if (!PlayerHasFeature(player)) return;
         var colors = GetFeatureValue<List<string>>(player);
         if (colors == null) return;
-        var menu = CreateMenu("Цвет тега и ника");
+        var menu = CreateMenu(title);
         menu.AddMenuOption("По умолчанию", (controller, _) =>
         {
             if (PlayerHasFeature(controller))
-                SetPlayerCookie(controller.SteamID, "4ill_tag_color", "");
+                SetPlayerCookie(controller.SteamID, cookieKey, "");
         });
         foreach (var color in colors.Distinct())
         {
             menu.AddMenuOption(ColorLabel(color), (controller, _) =>
             {
                 if (PlayerHasFeature(controller) && GetFeatureValue<List<string>>(controller).Contains(color))
-                    SetPlayerCookie(controller.SteamID, "4ill_tag_color", color);
+                    SetPlayerCookie(controller.SteamID, cookieKey, color);
             });
         }
         menu.Open(player);

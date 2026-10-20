@@ -6,13 +6,13 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "VIP_Tag/1.0.0": {
+      "VIP_Tag_4ill_1_3/1.0.0": {
         "dependencies": {
           "CounterStrikeSharp.API": "1.0.376",
           "MySqlConnector": "2.3.7"
         },
         "runtime": {
-          "VIP_Tag.dll": {}
+          "VIP_Tag_4ill_1_3.dll": {}
         }
       },
       "CounterStrikeSharp.API/1.0.376": {
@@ -538,7 +538,7 @@
     }
   },
   "libraries": {
-    "VIP_Tag/1.0.0": {
+    "VIP_Tag_4ill_1_3/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""
