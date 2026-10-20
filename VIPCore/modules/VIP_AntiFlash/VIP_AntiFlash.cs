@@ -1,6 +1,8 @@
-﻿using CounterStrikeSharp.API.Core;
+﻿using CounterStrikeSharp.API;
+using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using VipCoreApi;
+using Microsoft.Extensions.Logging;
 using static VipCoreApi.IVipCoreApi;
 
 namespace VIP_AntiFlash;
@@ -9,31 +11,46 @@ public class VipAntiFlash : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] Anti Flash";
-    public override string ModuleVersion => "v1.0.3";
+    public override string ModuleVersion => "v1.0.4";
    
     private IVipCoreApi? _api;
     private AntiFlash? _antiFlash;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
-    public override void OnAllPluginsLoaded(bool hotReload)
+    public override void Load(bool hotReload) => Server.NextWorldUpdate(Initialize);
+
+    public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
+
+    private void Initialize()
     {
+        if (_antiFlash != null) return;
         _api = PluginCapability.Get();
         if (_api == null) return;
+        _api.OnCoreReady += RegisterFeature;
+        // CoreReady has already fired when this module is loaded on a live server.
+        RegisterFeature();
+    }
 
-        _api.OnCoreReady += () =>
-        {
-            _antiFlash = new AntiFlash(this, _api);
-            _api.RegisterFeature(_antiFlash);
-        };
+    private void RegisterFeature()
+    {
+        if (_api == null || _antiFlash != null) return;
+        _antiFlash = new AntiFlash(this, _api);
+        _api.RegisterFeature(_antiFlash);
+        Logger.LogInformation("Antiflash registered; configured values: {Values}",
+            string.Join(" | ", _api.GetAllRegisteredFeatures()
+                .Where(entry => entry.feature == "Antiflash")
+                .Select(entry => entry.value?.ToString())));
     }
 
     public override void Unload(bool hotReload)
     {
-        if (_antiFlash != null)
-        {
-            _api?.UnRegisterFeature(_antiFlash);
-        }
+        if (_api == null) return;
+        _api.OnCoreReady -= RegisterFeature;
+        if (_antiFlash == null) return;
+        _api.UnRegisterFeature(_antiFlash);
+        _antiFlash = null;
     }
+
 }
 
 public class AntiFlash : VipFeatureBase
