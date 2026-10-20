@@ -36,4 +36,5 @@ var zero = new RegenSchedule(10, 1, 0, 0);
 Check(zero.IsDue(10), "Zero delay may heal immediately");
 zero.Advance(10);
 Check(!zero.IsDue(10) && zero.IsDue(10.1), "Zero interval must remain bounded by the poll interval");
-Console.WriteLine("All 18 regeneration schedule assertions passed.");
+Console.WriteLine("All regeneration schedule assertions passed.");
+
