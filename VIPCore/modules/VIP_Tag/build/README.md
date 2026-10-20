@@ -56,9 +56,8 @@ Keep `Tag` as the regular toggle. Add `TagColor` only to groups allowed to choos
   "MessageColor": "default"
 },
 "TagColor": [
-  "default", "darkred", "green", "lightyellow", "lightblue", "olive", "lime",
-  "red", "lightpurple", "purple", "grey", "yellow", "gold", "silver", "blue",
-  "darkblue", "bluegrey", "magenta", "lightred", "orange", "teamcolor"
+  "default", "darkred", "green", "yellow", "blue", "olive", "lime", "red",
+  "lightpurple", "purple", "grey", "gold", "silver", "darkblue", "lightred", "teamcolor"
 ]
 ```
 
@@ -75,3 +74,6 @@ The module registers once both at startup and on live load. Existing VIP players
 feature states refreshed when the module registers. Unloading detaches VIPCore feature events.
 The package includes MySqlConnector because some deployed SimpleAdmin API types reference it
 during CounterStrikeSharp type discovery. Do not copy or replace the CounterStrikeSharp runtime.
+
+The deployment palette has 15 distinct fixed colors plus the dynamic team-color option.
+Aliases such as blue/lightblue, yellow/lightyellow and gold/orange are not repeated in the menu.
