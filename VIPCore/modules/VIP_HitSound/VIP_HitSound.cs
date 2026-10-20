@@ -15,7 +15,7 @@ public class VipHitSound : BasePlugin
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Hit Sound";
     public override string ModuleVersion => "1.0.0";
-    public override string ModuleDescription => "Plays a selectable sound when a VIP player hits an enemy";
+    public override string ModuleDescription => "Plays a selectable sound to a VIP player when they hit an enemy";
 
     private HitSound? _hitSound;
     private IVipCoreApi? _api;
@@ -74,7 +74,6 @@ public class HitSound : VipFeatureBase
     private const string NormalCookie = "hitsound_normal";
     private const string HeadshotCookie = "hitsound_hs";
     private const string VolumeCookie = "hitsound_volume";
-    private const string SpectatorsCookie = "hitsound_spectators";
     private const string Off = "off";
 
     private static readonly int[] VolumeSteps = { 10, 25, 50, 75, 100 };
@@ -87,7 +86,6 @@ public class HitSound : VipFeatureBase
         public string? Normal;
         public string? Hs;
         public int Volume = 100;
-        public bool Spectators = true;
     }
 
     private readonly Dictionary<int, Prefs> _prefs = new();
@@ -133,10 +131,7 @@ public class HitSound : VipFeatureBase
         entry ??= Pick(attacker, entries, false);
         if (entry == null) return HookResult.Continue;
 
-        var listeners = new List<CCSPlayerController> { attacker };
-        var prefs = Load(attacker);
-        if (prefs.Spectators) AddSpectators(attacker, listeners);
-        Play(attacker, listeners, entry, prefs.Volume);
+        Play(attacker, entry, Load(attacker).Volume);
 
         return HookResult.Continue;
     }
@@ -171,16 +166,6 @@ public class HitSound : VipFeatureBase
             OnSelectItem(controller, state);
         });
 
-        menu.AddMenuOption(
-            GetTranslatedText("hitsound.Spectators",
-                GetTranslatedText(prefs.Spectators ? "hitsound.Yes" : "hitsound.No")), (controller, _) =>
-            {
-                var p = Load(controller);
-                p.Spectators = !p.Spectators;
-                SetPlayerCookie(controller.SteamID, SpectatorsCookie, p.Spectators ? 1 : 2);
-                OnSelectItem(controller, state);
-            });
-
         menu.Open(player);
     }
 
@@ -204,7 +189,7 @@ public class HitSound : VipFeatureBase
             {
                 Save(controller, hs, entry.Name);
                 PrintToChat(controller, GetTranslatedText("hitsound.On", entry.Name));
-                Play(controller, new List<CCSPlayerController> { controller }, entry, Load(controller).Volume); // preview
+                Play(controller, entry, Load(controller).Volume); // preview
             }, current == entry.Name);
         }
 
@@ -234,14 +219,12 @@ public class HitSound : VipFeatureBase
         var normal = GetPlayerCookie<string>(player.SteamID, NormalCookie);
         var hs = GetPlayerCookie<string>(player.SteamID, HeadshotCookie);
         var volume = GetPlayerCookie<int>(player.SteamID, VolumeCookie);
-        var spectators = GetPlayerCookie<int>(player.SteamID, SpectatorsCookie);
 
         var loaded = new Prefs
         {
             Normal = string.IsNullOrEmpty(normal) ? null : normal,
             Hs = string.IsNullOrEmpty(hs) ? null : hs,
-            Volume = VolumeSteps.Contains(volume) ? volume : 100,
-            Spectators = spectators != 2
+            Volume = VolumeSteps.Contains(volume) ? volume : 100
         };
         _prefs[player.Slot] = loaded;
         return loaded;
@@ -251,7 +234,7 @@ public class HitSound : VipFeatureBase
     private void PlayPreview(CCSPlayerController player, List<HitSoundEntry> entries, Prefs prefs)
     {
         var entry = Pick(player, entries, false) ?? Pick(player, entries, true);
-        if (entry != null) Play(player, new List<CCSPlayerController> { player }, entry, prefs.Volume);
+        if (entry != null) Play(player, entry, prefs.Volume);
     }
 
     /// <summary>
@@ -290,43 +273,19 @@ public class HitSound : VipFeatureBase
 
     // ---- sound ------------------------------------------------------------------------------
 
-    /// <summary>Adds every dead player who is currently spectating <paramref name="player"/>.</summary>
-    private static void AddSpectators(CCSPlayerController player, List<CCSPlayerController> listeners)
-    {
-        var pawn = player.PlayerPawn.Value;
-        if (pawn is not { IsValid: true }) return;
-
-        foreach (var other in Utilities.GetPlayers())
-        {
-            if (!other.IsValid || other.IsBot || other.Slot == player.Slot || other.PawnIsAlive) continue;
-
-            var target = other.Pawn.Value?.ObserverServices?.ObserverTarget.Value;
-            if (target is { IsValid: true } && target.Index == pawn.Index)
-                listeners.Add(other);
-        }
-    }
-
     /// <param name="percent">The player's own volume setting, multiplied with the entry volume.</param>
-    private static void Play(CCSPlayerController source, List<CCSPlayerController> listeners, HitSoundEntry entry,
-        int percent)
+    private static void Play(CCSPlayerController player, HitSoundEntry entry, int percent)
     {
         var volume = entry.Volume * percent / 100f;
         if (volume <= 0f) return;
 
         if (entry.Emit.Length > 0)
         {
-            if (!source.IsValid) return;
-
-            var filter = new RecipientFilter();
-            foreach (var listener in listeners)
-                filter.Add(listener);
-
-            source.EmitSound(entry.Emit, filter, volume);
+            if (player.IsValid) player.EmitSound(entry.Emit, new RecipientFilter(player), volume);
             return;
         }
 
-        var command = $"playvol {entry.Path} {Math.Clamp(volume, 0f, 1f).ToString("0.##", CultureInfo.InvariantCulture)}";
-        foreach (var listener in listeners)
-            listener.ExecuteClientCommand(command);
+        player.ExecuteClientCommand(
+            $"playvol {entry.Path} {Math.Clamp(volume, 0f, 1f).ToString("0.##", CultureInfo.InvariantCulture)}");
     }
 }
