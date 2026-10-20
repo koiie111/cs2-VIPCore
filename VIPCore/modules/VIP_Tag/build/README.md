@@ -41,3 +41,37 @@ installed, a warning is logged and gag/silence is not enforced for the chat tag.
 # Menu
 
 The feature is a toggle in `!vip` - the player can Enable or Disable their tag.
+
+
+# Premium color selection (4ill)
+
+Keep `Tag` as the regular toggle. Add `TagColor` only to groups allowed to choose a color:
+
+```json
+"Tag": {
+  "ScoreboardTag": "PREMIUM",
+  "ChatTag": "[PREMIUM]",
+  "ColorTag": "gold",
+  "NameColor": "gold",
+  "MessageColor": "default"
+},
+"TagColor": [
+  "default", "darkred", "green", "lightyellow", "lightblue", "olive", "lime",
+  "red", "lightpurple", "purple", "grey", "yellow", "gold", "silver", "blue",
+  "darkblue", "bluegrey", "magenta", "lightred", "orange", "teamcolor"
+]
+```
+
+`TagColor` opens a palette in `!vip`. It changes the chat prefix and player name together;
+message text retains `MessageColor`. The choice persists in VIPCore cookies and is revalidated
+against the player's current palette on each message. A downgraded player immediately falls back
+to their group's fixed colors. Scoreboard tags are plain text.
+
+For VIP, omit `TagColor` and set `ScoreboardTag` to `VIP`, `ChatTag` to `[VIP]`,
+and both `ColorTag` and `NameColor` to `blue`. The premium default is gold.
+Add `"TagColor": "Цвет тега и ника"` to the VIPCore language files for the menu label.
+
+The module registers once both at startup and on live load. Existing VIP players have their VIP
+feature states refreshed when the module registers. Unloading detaches VIPCore feature events.
+The package includes MySqlConnector because some deployed SimpleAdmin API types reference it
+during CounterStrikeSharp type discovery. Do not copy or replace the CounterStrikeSharp runtime.
