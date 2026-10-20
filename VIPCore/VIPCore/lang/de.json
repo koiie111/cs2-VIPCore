@@ -33,6 +33,7 @@
   "fov.Off": "Du hast die Funktion {blue}FOV{default} deaktiviert",
   "Items": "Gegenstände",
   "Killscreen": "Kill Effekt",
+  "KillIcon": "Kill-Symbol",
   "Money": "Geld",
   "RainbowModel": "Regenbogen Modell",
   "ArmorRegen": "Rüstung Regeneration",

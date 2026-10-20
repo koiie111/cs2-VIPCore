@@ -152,3 +152,7 @@ public class TestConfig
 ## License
 
 This project is licensed under the MIT License. See the LICENSE file for details.
+
+## Modules
+
+- [VIP_KillIcon](VIPCore/modules/VIP_KillIcon/README.md) — custom kill feed icons for VIP killers (headshot, noscope, jumpkill, etc.)
