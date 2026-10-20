@@ -160,3 +160,4 @@ This project is licensed under the MIT License. See the LICENSE file for details
 - [VIP_HitSound](VIPCore/modules/VIP_HitSound/README.md) — selectable hit and headshot sounds for VIP players, chosen in the VIP menu
 - [VIP_HitMarker](VIPCore/modules/VIP_HitMarker/README.md) — selectable particle hit marker at the crosshair, fully configurable by the player in the VIP menu
 - [VIP_PlayerParticle](VIPCore/modules/VIP_PlayerParticle/README.md) — selectable particle effect attached to VIP players, fully configurable by the player in the VIP menu
+- [VIP_Postprocessing](VIPCore/modules/VIP_Postprocessing/README.md) — selectable screen post-processing (color grading) for VIP players, fully configurable by the player in the VIP menu
