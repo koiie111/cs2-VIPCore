@@ -15,7 +15,7 @@ public class VipPlayerParticle : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Particle";
-    public override string ModuleVersion => "1.0.1";
+    public override string ModuleVersion => "1.0.2";
     public override string ModuleDescription => "Attaches a selectable particle effect to VIP players";
 
     private PlayerParticle? _feature;
@@ -138,7 +138,7 @@ public class PlayerParticle : VipFeatureBase
     /// <summary>Per-player settings, stored as one JSON cookie. A null value means "use the config default".</summary>
     private class Prefs
     {
-        /// <summary>null = never chosen (first entry of the group), "off" = disabled, otherwise an entry name.</summary>
+        /// <summary>null = never chosen (disabled), "off" = disabled, otherwise an explicitly selected entry name.</summary>
         [JsonPropertyName("p")] public string? Particle { get; set; }
         [JsonPropertyName("h")] public float? Height { get; set; }
         [JsonPropertyName("m")] public MineMode Mine { get; set; } = MineMode.All;
@@ -367,12 +367,12 @@ public class PlayerParticle : VipFeatureBase
 
     /// <summary>
     /// The entry the player picked if the group still offers it, otherwise the first entry of the group
-    /// (so a fresh VIP gets an effect without opening the menu). Null when disabled.
+    /// after an explicit selection. No saved selection means disabled.
     /// </summary>
     private PlayerParticleEntry? Current(CCSPlayerController player, List<PlayerParticleEntry> entries)
     {
         var saved = Load(player).Particle;
-        if (saved == Off) return null;
+        if (string.IsNullOrEmpty(saved) || saved == Off) return null;
         return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
     }
 
