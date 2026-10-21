@@ -17,7 +17,7 @@ public class VipHitMarker : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Hit Marker";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleDescription => "Shows a selectable particle hit marker in front of a VIP player's crosshair";
 
     private HitMarker? _hitMarker;
@@ -149,7 +149,7 @@ public class HitMarker : VipFeatureBase
     /// <summary>Per-player settings, stored as one JSON cookie. A null value means "use the config default".</summary>
     private class Prefs
     {
-        /// <summary>null = never chosen (first entry of the group), "off" = disabled, otherwise an entry name.</summary>
+        /// <summary>null = never chosen (disabled by default), "off" = disabled, otherwise an entry name.</summary>
         [JsonPropertyName("m")] public string? Marker { get; set; }
         [JsonPropertyName("hs")] public bool Headshot { get; set; } = true;
         [JsonPropertyName("sp")] public bool Spectators { get; set; } = true;
@@ -432,13 +432,13 @@ public class HitMarker : VipFeatureBase
         SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(Load(player), PrefsJson));
 
     /// <summary>
-    /// The entry the player picked if the group still offers it, otherwise the first entry of the group
-    /// (so a fresh VIP gets a marker without opening the menu). Null when disabled.
+    /// The entry explicitly picked by the player, falling back to the first group entry if it was removed.
+    /// Null when disabled or when the player has never selected a marker.
     /// </summary>
     private HitMarkerEntry? Current(CCSPlayerController player, List<HitMarkerEntry> entries)
     {
         var saved = Load(player).Marker;
-        if (saved == Off) return null;
+        if (string.IsNullOrEmpty(saved) || saved == Off) return null;
         return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
     }
 

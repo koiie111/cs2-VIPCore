@@ -4,10 +4,14 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- A distinct identity permits live updates when the loader retains the old assembly. -->
+    <AssemblyName>VIP_HitMarker_4ill_DefaultOff</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="CounterStrikeSharp.API" Version="1.0.376" />
+    <!-- Required during type discovery on servers with the SimpleAdmin public API loaded. -->
+    <PackageReference Include="MySqlConnector" Version="2.3.7" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="VipCoreApi">
@@ -16,4 +20,12 @@
     </Reference>
   </ItemGroup>
 
+  <Target Name="CopyConventionalEntryPoint" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(TargetDir)VIP_HitMarker.dll" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).deps.json" DestinationFiles="$(TargetDir)VIP_HitMarker.deps.json" />
+  </Target>
+  <Target Name="PublishConventionalEntryPoint" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).dll" DestinationFiles="$(PublishDir)VIP_HitMarker.dll" />
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).deps.json" DestinationFiles="$(PublishDir)VIP_HitMarker.deps.json" />
+  </Target>
 </Project>
