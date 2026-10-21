@@ -111,6 +111,19 @@ try
     var results = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ => Run(17)));
     Check(results.Sum(r => r.Count) == 1 && await Row(17) is ("VIP", 0) && await FallbackCount(17) == 0,
         "concurrent calls restore exactly once");
+
+    // vip_global keeps one row per account (PK account_id, name TEXT), see 20261021_0001_create_vip_global_storage.sql.
+    await db.ExecuteAsync("DROP TABLE vip_users");
+    await db.ExecuteAsync("""
+        CREATE TABLE vip_users (account_id BIGINT NOT NULL, name TEXT NOT NULL, lastvisit BIGINT NOT NULL,
+            sid BIGINT NOT NULL, `group` VARCHAR(64) NOT NULL, expires BIGINT NOT NULL, PRIMARY KEY (account_id))
+        """);
+    await Seed(20, "PREMIUM", now - 10);
+    await Fallback(20, "VIP", now + 900);
+    o = await Run(20);
+    Check(o.Count == 1 && o[0].RestoredGroup == "VIP" && await Row(20) is ("VIP", var e20) && e20 == now + 900 &&
+          await FallbackCount(20) == 0, "vip_global schema: timed fallback restored");
+    Check((await Run(20)).Count == 0, "vip_global schema: repeat call is a no-op");
 }
 finally { await db.ExecuteAsync("DROP TABLE IF EXISTS vip_user_fallbacks, vip_users"); }
 

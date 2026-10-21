@@ -4,6 +4,7 @@
   "vip.WelcomeToTheServer": "Olá, {blue}{0}{default}! Você é um jogador VIP.",
   "vip.Expires": "Seu status {blue}{0}{default} expira {blue}{1}",
   "vip.Expired": "Seu status {blue}{0}{default} expirou.",
+  "vip.FallbackRestored": "Seu privilégio {blue}{0}{default} foi restaurado.",
   "vip.NoAccess": "Você não tem acesso a este comando!",
   "vip.AlreadyVipPrivileges": "Já tem privilégios VIP",
   "chat.Enabled": "{green}Habilitado{default} ",

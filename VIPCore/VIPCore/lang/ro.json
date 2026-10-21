@@ -4,6 +4,7 @@
   "vip.WelcomeToTheServer": "Salut, {blue}{0}{default}! Esti un jucator VIP! ",
   "vip.Expires": "{blue}{0}-ul{default} tau expira in {blue}{1}",
   "vip.Expired": "{blue}{0}-ul{default} a expirat.",
+  "vip.FallbackRestored": "Privilegiul {blue}{0}{default} a fost restabilit.",
   "vip.NoAccess": "Nu ai acces la aceasta comanda!",
   "vip.AlreadyVipPrivileges": "Ai deja beneficiile de VIP.",
   "chat.Enabled": "{green}Activat{default} ",

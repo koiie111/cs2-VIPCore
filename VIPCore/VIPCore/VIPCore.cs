@@ -162,17 +162,54 @@ public class VipCore : BasePlugin
                 var authId = player.AuthorizedSteamID;
                 if (authId == null) continue;
 
-                Task.Run(() => Database.RemoveExpiredUsers(player, authId));
+                var expiredInMemory = Users.TryGetValue(authId.SteamId64, out var user) && user.expires != 0 &&
+                                      DateTime.UtcNow.GetUnixEpoch() > user.expires
+                    ? user.group
+                    : null;
 
                 IsClientVip[player.Slot] = IsUserActiveVip(player);
+
+                Task.Run(async () =>
+                {
+                    if (await Database.RemoveExpiredUsers(player, authId) == 0 && expiredInMemory != null)
+                        await ReloadAfterMissedExpiry(player, authId, expiredInMemory);
+                });
             }
         }, TimerFlags.REPEAT);
+    }
+
+    // The site cron may have already handed the expired row over to its fallback (or extended it), so the database
+    // had nothing left to expire. Without a reload the player would stay without privileges until reconnect.
+    private async Task ReloadAfterMissedExpiry(CCSPlayerController player, SteamID steamId, string expiredGroup)
+    {
+        var userFromDb = await Database.GetUserFromDb(steamId.AccountId);
+        if (userFromDb == null || !userFromDb.OfType<User>().Any(user => user.sid == CoreConfig.ServerId)) return;
+
+        await Server.NextFrameAsync(() =>
+        {
+            if (player.IsValid) VipApi.OnPlayerRemoved(player, expiredGroup);
+        });
+        await OnClientAuthorizedAsync(player, steamId);
     }
 
     public async Task OnClientAuthorizedAsync(CCSPlayerController player, SteamID steamId)
     {
         try
         {
+            var expiredOnConnect = await Database.ExpireOnConnect(steamId.AccountId);
+            if (expiredOnConnect.Count > 0)
+            {
+                await Server.NextFrameAsync(() => AddTimer(5.0f, () =>
+                {
+                    foreach (var outcome in expiredOnConnect)
+                    {
+                        PrintToChat(player, Localizer["vip.Expired", outcome.ExpiredGroup]);
+                        if (outcome.RestoredGroup != null)
+                            PrintToChat(player, Localizer["vip.FallbackRestored", outcome.RestoredGroup]);
+                    }
+                }));
+            }
+
             var userFromDb = await Database.GetUserFromDb(steamId.AccountId);
             if (userFromDb == null) return;
 

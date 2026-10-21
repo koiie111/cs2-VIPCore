@@ -283,7 +283,39 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
         return _fallbackTableExists;
     }
 
-    public async Task RemoveExpiredUsers(CCSPlayerController player, SteamID steamId)
+    // Hands expired rows over to their fallback before the player is loaded, so a returning player does not wait for
+    // the 300 s timer. Without vip_user_fallbacks this does nothing and the timer keeps the old behaviour.
+    public async Task<List<ExpiryOutcome>> ExpireOnConnect(int accountId)
+    {
+        try
+        {
+            await using var connection = new MySqlConnection(dbConnectionString);
+            await connection.OpenAsync();
+            if (!await FallbackTableExists(connection)) return [];
+
+            var serverId = await GetServerId(connection);
+            var outcomes = await ExpiredVipProcessor.ProcessAsync(connection, accountId, serverId,
+                DateTimeOffset.UtcNow.ToUnixTimeSeconds(), true);
+            outcomes.ForEach(LogExpiry);
+            return outcomes;
+        }
+        catch (Exception e)
+        {
+            logger.LogError(e.ToString());
+            return [];
+        }
+    }
+
+    private void LogExpiry(ExpiryOutcome outcome)
+    {
+        vipCore.PrintLogInfo(outcome.RestoredGroup == null
+                ? "User '{name} [{accId}]' has been removed due to expired VIP status."
+                : "User '{name} [{accId}]' VIP expired, fallback privilege restored.", outcome.Name,
+            outcome.AccountId);
+    }
+
+    /// <returns>The number of expired rows found in the database for this player.</returns>
+    public async Task<int> RemoveExpiredUsers(CCSPlayerController player, SteamID steamId)
     {
         try
         {
@@ -307,7 +339,8 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
 
                     vipCore.VipApi.OnPlayerRemoved(player, outcome.ExpiredGroup);
 
-                    if (outcome.RestoredGroup == null || !isThisPlayer) return;
+                    // The player may have left while the query ran; the next connect loads the restored row anyway.
+                    if (outcome.RestoredGroup == null || !isThisPlayer || !player.IsValid) return;
 
                     var steamId64 = authSteamId!.SteamId64;
                     vipCore.Users[steamId64] = new User
@@ -327,15 +360,15 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
                     vipCore.PrintToChat(player, vipCore.Localizer["vip.FallbackRestored", outcome.RestoredGroup]);
                 });
 
-                vipCore.PrintLogInfo(outcome.RestoredGroup == null
-                        ? "User '{name} [{accId}]' has been removed due to expired VIP status."
-                        : "User '{name} [{accId}]' VIP expired, fallback privilege restored.", outcome.Name,
-                    outcome.AccountId);
+                LogExpiry(outcome);
             }
+
+            return outcomes.Count;
         }
         catch (Exception e)
         {
             logger.LogError(e.ToString());
+            return -1;
         }
     }
 

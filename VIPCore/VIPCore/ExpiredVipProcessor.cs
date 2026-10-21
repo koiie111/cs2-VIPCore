@@ -36,6 +36,13 @@ public static class ExpiredVipProcessor
     {
         var outcomes = new List<ExpiryOutcome>();
 
+        // Unlocked check first: the timer runs this for every online player of every server sharing the database,
+        // and almost all of them have nothing to expire. The locking read below repeats the condition.
+        if (await connection.ExecuteScalarAsync<int>(
+                "SELECT COUNT(*) FROM vip_users WHERE account_id = @AccId AND sid = @sid AND expires < @now AND expires > 0",
+                new { AccId = accountId, sid, now }) == 0)
+            return outcomes;
+
         await using var tx = await connection.BeginTransactionAsync();
         try
         {

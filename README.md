@@ -29,6 +29,7 @@ Located in the folder `addons/counterstrikesharp/configs/plugins/VIPCore`
 {
   "TimeMode": 0,		   // 0 - seconds | 1 - minutes | 2 - hours | 3 - days)
   "ServerId": 0,		   // SERVER ID
+  "UseFixedServerId": false,	   // `true` for a VIP database shared by several servers: sid is always ServerId, `vip_servers` is not used
   "UseCenterHtmlMenu": true,	   //If `true`, the menu will be in the center, if `false`, it will be in the chat. Note that if you have another plugin that uses `CenterHtml`, server crashes may occur
   "ServerIP": "0.0.0.0", 	   // default ip
   "ServerPort": 27015, 		   // default port

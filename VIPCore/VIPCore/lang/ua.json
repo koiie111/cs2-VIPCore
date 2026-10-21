@@ -4,6 +4,7 @@
   "vip.WelcomeToTheServer": "Вітаємо, {blue}{0}{default}! Ви є VIP-гравцем.",
   "vip.Expires": "Ваш {blue}{0}{default} статус закінчується {blue}{1}",
   "vip.Expired": "Ваш {blue}{0}{default} статус закінчився.",
+  "vip.FallbackRestored": "Повернулася привілея {blue}{0}{default}.",
   "vip.NoAccess": "У вас немає доступу до цієї команди!",
   "vip.AlreadyVipPrivileges": "У вас вже є VIP привілеї.",
   "chat.Enabled": "{green}Увімкнено{default} ",
