@@ -33,6 +33,8 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
 
             await dbConnection.ExecuteAsync(createVipUsersTable);
 
+            if (vipCore.CoreConfig.UseFixedServerId) return;
+
             const string createVipServersTable = """
                                                  CREATE TABLE IF NOT EXISTS `vip_servers` (
                                                      `serverId` BIGINT NOT NULL,
@@ -267,6 +269,20 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
         return null;
     }
 
+    private bool _fallbackTableExists;
+    private DateTime _fallbackTableCheckedAt = DateTime.MinValue;
+
+    // A positive answer is final; a negative one is rechecked every 10 minutes (the migration may land while running).
+    private async Task<bool> FallbackTableExists(MySqlConnection connection)
+    {
+        if (_fallbackTableExists) return true;
+        if (DateTime.UtcNow - _fallbackTableCheckedAt < TimeSpan.FromMinutes(10)) return false;
+
+        _fallbackTableExists = await ExpiredVipProcessor.FallbackTableExistsAsync(connection);
+        _fallbackTableCheckedAt = DateTime.UtcNow;
+        return _fallbackTableExists;
+    }
+
     public async Task RemoveExpiredUsers(CCSPlayerController player, SteamID steamId)
     {
         try
@@ -274,37 +290,47 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
             await using var connection = new MySqlConnection(dbConnectionString);
             await connection.OpenAsync();
             var serverId = await GetServerId(connection);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-            var expiredUsers = await connection.QueryAsync<User>(
-                "SELECT * FROM vip_users WHERE account_id = @AccId AND sid = @sid AND expires < @CurrentTime AND expires > 0",
-                new
-                {
-                    AccId = steamId.AccountId,
-                    sid = serverId,
-                    CurrentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                });
-            Console.WriteLine($"Removing expired VIPS, Current time: {DateTimeOffset.UtcNow.ToUnixTimeSeconds()}");
+            var outcomes = await ExpiredVipProcessor.ProcessAsync(connection, steamId.AccountId, serverId, now,
+                await FallbackTableExists(connection));
 
-            foreach (var user in expiredUsers)
+            foreach (var outcome in outcomes)
             {
-                await connection.ExecuteAsync("DELETE FROM vip_users WHERE account_id = @AccId AND sid = @sid",
-                    new
-                    {
-                        AccId = user.account_id,
-                        user.sid
-                    });
-
                 await Server.NextFrameAsync(() =>
                 {
                     var authSteamId = player.AuthorizedSteamID;
-                    if (authSteamId != null && authSteamId.AccountId == user.account_id)
-                        vipCore.PrintToChat(player, vipCore.Localizer["vip.Expired", user.group]);
+                    var isThisPlayer = authSteamId != null && authSteamId.AccountId == outcome.AccountId;
 
-                    vipCore.VipApi.OnPlayerRemoved(player, user.group);
+                    if (isThisPlayer)
+                        vipCore.PrintToChat(player, vipCore.Localizer["vip.Expired", outcome.ExpiredGroup]);
+
+                    vipCore.VipApi.OnPlayerRemoved(player, outcome.ExpiredGroup);
+
+                    if (outcome.RestoredGroup == null || !isThisPlayer) return;
+
+                    var steamId64 = authSteamId!.SteamId64;
+                    vipCore.Users[steamId64] = new User
+                    {
+                        account_id = outcome.AccountId,
+                        name = outcome.Name,
+                        lastvisit = DateTime.UtcNow.GetUnixEpoch(),
+                        sid = (int)serverId,
+                        group = outcome.RestoredGroup,
+                        expires = (int)outcome.RestoredExpires
+                    };
+
+                    // Rebuild per-feature states for the new group, then let the modules re-apply their features.
+                    vipCore.SetClientFeature(steamId64, outcome.RestoredGroup);
+                    vipCore.IsClientVip[player.Slot] = true;
+                    vipCore.VipApi.OnPlayerLoaded(player, outcome.RestoredGroup);
+                    vipCore.PrintToChat(player, vipCore.Localizer["vip.FallbackRestored", outcome.RestoredGroup]);
                 });
 
-                vipCore.PrintLogInfo("User '{name} [{accId}]' has been removed due to expired VIP status.", user.name,
-                    user.account_id);
+                vipCore.PrintLogInfo(outcome.RestoredGroup == null
+                        ? "User '{name} [{accId}]' has been removed due to expired VIP status."
+                        : "User '{name} [{accId}]' VIP expired, fallback privilege restored.", outcome.Name,
+                    outcome.AccountId);
             }
         }
         catch (Exception e)
@@ -315,6 +341,9 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
 
     private async Task<long> GetServerId(IDbConnection connection)
     {
+        if (vipCore.CoreConfig.UseFixedServerId)
+            return vipCore.CoreConfig.ServerId;
+
         try
         {
             const string query = """

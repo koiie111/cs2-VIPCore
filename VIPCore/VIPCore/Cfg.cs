@@ -26,6 +26,9 @@ public class CoreConfig
 {
     public int TimeMode { get; init; } = 0;
     public int ServerId { get; init; } = 0;
+
+    // Shared (global) VIP database: sid is always ServerId, vip_servers is neither read nor written.
+    public bool UseFixedServerId { get; init; } = false;
     public bool UseCenterHtmlMenu { get; init; } = true;
     [JsonPropertyName("ServerIP")] public string ServerIp { get; init; } = "0.0.0.0";
     public int ServerPort { get; init; } = 27015;
