@@ -194,9 +194,10 @@ public class PlayerParticle : VipFeatureBase
         });
 
         // Module loaded on a live server: pick up VIPs already in game.
-        foreach (var player in Utilities.GetPlayers())
-            if (!player.IsBot && IsClientVip(player))
-                Apply(player);
+        if (_resourcesReady())
+            foreach (var player in Utilities.GetPlayers())
+                if (!player.IsBot && IsClientVip(player))
+                    Apply(player);
     }
 
     /// <summary>Called on plugin unload; CounterStrikeSharp drops handlers and listeners itself.</summary>
