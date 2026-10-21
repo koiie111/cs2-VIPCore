@@ -16,7 +16,7 @@ public class VipPostprocessing : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Postprocessing";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleDescription => "Selectable screen post-processing (color grading) for VIP players";
 
     private Postprocessing? _feature;
@@ -143,7 +143,7 @@ public class Postprocessing : VipFeatureBase
     /// <summary>Per-player settings, stored as one JSON cookie. A null value means "use the config default".</summary>
     private class Prefs
     {
-        /// <summary>null = never chosen (first allowed entry), "off" = disabled, otherwise an entry name.</summary>
+        /// <summary>null = never chosen (disabled), "off" = disabled, otherwise an entry name.</summary>
         [JsonPropertyName("p")] public string? Effect { get; set; }
         [JsonPropertyName("f")] public float? Fade { get; set; }
         [JsonPropertyName("e")] public bool Exposure { get; set; } = true;
@@ -386,14 +386,14 @@ public class Postprocessing : VipFeatureBase
         SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(Load(player), PrefsJson));
 
     /// <summary>
-    /// The entry the player picked if they may still use it, otherwise the first allowed entry
-    /// (so a fresh VIP gets an effect without opening the menu). Null when disabled.
+    /// The entry explicitly selected by the player, if it is still available.
+    /// No saved choice, a disabled effect, or an unavailable choice leaves the screen unchanged.
     /// </summary>
     private PostprocessingEntry? Current(CCSPlayerController player, List<PostprocessingEntry> entries)
     {
         var saved = Load(player).Effect;
-        if (saved == Off) return null;
-        return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
+        if (string.IsNullOrEmpty(saved) || saved == Off) return null;
+        return entries.FirstOrDefault(e => e.Name == saved);
     }
 
     private List<PostprocessingEntry>? TryGetEntries(CCSPlayerController player)
