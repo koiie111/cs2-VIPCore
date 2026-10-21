@@ -181,6 +181,9 @@ public class Outfit : VipFeatureBase
             return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        // Entity destruction belongs to the game loop, outside snapshot construction.
+        plugin.AddTimer(0.25f, () => { if (!_stopped && FxFilterBridge.Disabled(1)) RemoveAll(); },
+            CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnMapStart>(_ => Array.Clear(_worn));
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
@@ -436,6 +439,7 @@ public class Outfit : VipFeatureBase
 
     private static CDynamicProp? Wear(CCSPlayerPawn pawn, string model)
     {
+        if (FxFilterBridge.Disabled(1)) return null;
         var prop = Utilities.CreateEntityByName<CDynamicProp>("prop_dynamic_override");
         if (prop == null || !prop.IsValid) return null;
 
@@ -474,6 +478,7 @@ public class Outfit : VipFeatureBase
     /// <summary>Strips outfits from each viewer's snapshot according to both visibility settings.</summary>
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
+        var disabled = FxFilterBridge.Disabled(1);
         if (_stopped) return;
 
         var any = false;
@@ -491,6 +496,7 @@ public class Outfit : VipFeatureBase
             if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
 
             var viewerPrefs = _prefs.GetValueOrDefault(viewer.Slot);
+            var hideOthers = FxFilterBridge.Hidden(viewer.Slot, 1);
             for (var owner = 0; owner < MaxPlayers; owner++)
             {
                 var worn = _worn[owner];
@@ -500,7 +506,7 @@ public class Outfit : VipFeatureBase
                 bool hide;
                 if (owner == viewer.Slot)
                 {
-                    hide = ownerPrefs is { SeeOwn: false };
+                    hide = disabled || ownerPrefs is { SeeOwn: false };
                 }
                 else
                 {
@@ -518,7 +524,7 @@ public class Outfit : VipFeatureBase
                         OthersMode.None => false,
                         _ => true
                     };
-                    hide = !ownerAllows || !viewerAllows;
+                    hide = disabled || hideOthers || !ownerAllows || !viewerAllows;
                 }
 
                 if (!hide) continue;

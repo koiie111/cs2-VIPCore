@@ -183,6 +183,9 @@ public class C4Effect : VipFeatureBase
             return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        // Entity destruction belongs to the game loop, outside snapshot construction.
+        plugin.AddTimer(0.25f, () => { if (!_stopped && FxFilterBridge.Disabled(2)) RemoveAll(); },
+            CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnMapStart>(_ =>
         {
             _active.Clear();
@@ -470,6 +473,7 @@ public class C4Effect : VipFeatureBase
 
     private static CParticleSystem? Spawn(string effect, Vector position, CBaseEntity? follow)
     {
+        if (FxFilterBridge.Disabled(2)) return null;
         var particle = Utilities.CreateEntityByName<CParticleSystem>("info_particle_system");
         if (particle == null || !particle.IsValid) return null;
 
@@ -522,6 +526,7 @@ public class C4Effect : VipFeatureBase
     /// <summary>Strips effects from each viewer's snapshot according to both visibility settings.</summary>
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
+        var disabled = FxFilterBridge.Disabled(2);
         if (_stopped || _active.Count == 0) return;
 
         Array.Clear(_team);
@@ -534,6 +539,7 @@ public class C4Effect : VipFeatureBase
             if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
 
             var viewerPrefs = _prefs.GetValueOrDefault(viewer.Slot);
+            var hideOthers = FxFilterBridge.Hidden(viewer.Slot, 2);
             foreach (var spawned in _active)
             {
                 var particle = spawned.Particle;
@@ -542,7 +548,7 @@ public class C4Effect : VipFeatureBase
                 var owner = spawned.Owner;
                 if (owner == viewer.Slot)
                 {
-                    if (!spawned.SeeOwn)
+                    if (disabled || !spawned.SeeOwn)
                         info.TransmitEntities.Remove((int)particle.Index);
                     continue;
                 }
@@ -562,7 +568,7 @@ public class C4Effect : VipFeatureBase
                     _ => true
                 };
 
-                if (!ownerAllows || !viewerAllows)
+                if (disabled || hideOthers || !ownerAllows || !viewerAllows)
                     info.TransmitEntities.Remove((int)particle.Index);
             }
         }

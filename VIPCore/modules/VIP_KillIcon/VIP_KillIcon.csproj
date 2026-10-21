@@ -2,4 +2,8 @@
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
   <ItemGroup><PackageReference Include="CounterStrikeSharp.API" Version="1.0.376" /></ItemGroup>
   <ItemGroup><Reference Include="VipCoreApi"><HintPath>../../VipCoreApi.dll</HintPath><Private>False</Private></Reference></ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/FxFilterBridge.cs" Link="FxFilterBridge.cs" />
+    <Reference Include="FxFilterApi"><HintPath>../../FxFilterApi.dll</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
 </Project>

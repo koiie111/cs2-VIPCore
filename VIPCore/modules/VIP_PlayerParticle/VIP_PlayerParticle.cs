@@ -180,6 +180,9 @@ public class PlayerParticle : VipFeatureBase
             return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        // Entity destruction belongs to the game loop, outside snapshot construction.
+        plugin.AddTimer(0.25f, () => { if (!_stopped && FxFilterBridge.Disabled(1)) RemoveAll(); },
+            CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnMapStart>(_ => Array.Clear(_active));
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
@@ -408,6 +411,7 @@ public class PlayerParticle : VipFeatureBase
 
         var height = Load(player).Height ?? entry.Offset;
 
+        if (FxFilterBridge.Disabled(1)) return;
         var particle = Utilities.CreateEntityByName<CParticleSystem>("info_particle_system");
         if (particle == null || !particle.IsValid) return;
 
@@ -446,6 +450,7 @@ public class PlayerParticle : VipFeatureBase
     /// <summary>Strips particles from each viewer's snapshot according to both visibility settings.</summary>
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
+        var disabled = FxFilterBridge.Disabled(1);
         if (_stopped) return;
 
         var any = false;
@@ -463,6 +468,7 @@ public class PlayerParticle : VipFeatureBase
             if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
 
             var viewerPrefs = _prefs.GetValueOrDefault(viewer.Slot);
+            var hideOthers = FxFilterBridge.Hidden(viewer.Slot, 1);
             for (var owner = 0; owner < MaxPlayers; owner++)
             {
                 var particle = _active[owner];
@@ -471,7 +477,7 @@ public class PlayerParticle : VipFeatureBase
                 var ownerPrefs = _prefs.GetValueOrDefault(owner);
                 if (owner == viewer.Slot)
                 {
-                    if (ownerPrefs is { SeeOwn: false })
+                    if (disabled || ownerPrefs is { SeeOwn: false })
                         info.TransmitEntities.Remove((int)particle.Index);
                     continue;
                 }
@@ -491,7 +497,7 @@ public class PlayerParticle : VipFeatureBase
                     _ => true
                 };
 
-                if (!ownerAllows || !viewerAllows)
+                if (disabled || hideOthers || !ownerAllows || !viewerAllows)
                     info.TransmitEntities.Remove((int)particle.Index);
             }
         }

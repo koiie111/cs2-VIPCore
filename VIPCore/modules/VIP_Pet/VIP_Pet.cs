@@ -230,6 +230,9 @@ public class Pet : VipFeatureBase
             return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        // Entity destruction belongs to the game loop, outside snapshot construction.
+        plugin.AddTimer(0.25f, () => { if (!_stopped && FxFilterBridge.Disabled(1)) RemoveAll(); },
+            CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnTick>(OnTick);
         plugin.RegisterListener<Listeners.OnMapStart>(_ => Array.Clear(_pets));
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
@@ -542,6 +545,7 @@ public class Pet : VipFeatureBase
 
         var start = new Vector(origin.X, origin.Y, origin.Z + (def.Flying ? height : 0f));
 
+        if (FxFilterBridge.Disabled(1)) return;
         var prop = Utilities.CreateEntityByName<CDynamicProp>("prop_dynamic_override");
         if (prop == null || !prop.IsValid) return;
 
@@ -723,6 +727,7 @@ public class Pet : VipFeatureBase
     /// <summary>Strips pets from each viewer's snapshot according to both visibility settings.</summary>
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
+        var disabled = FxFilterBridge.Disabled(1);
         if (_stopped) return;
 
         var any = false;
@@ -740,6 +745,7 @@ public class Pet : VipFeatureBase
             if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
 
             var viewerPrefs = _prefs.GetValueOrDefault(viewer.Slot);
+            var hideOthers = FxFilterBridge.Hidden(viewer.Slot, 1);
             for (var owner = 0; owner < MaxPlayers; owner++)
             {
                 var pet = _pets[owner];
@@ -748,7 +754,7 @@ public class Pet : VipFeatureBase
                 var ownerPrefs = _prefs.GetValueOrDefault(owner);
                 if (owner == viewer.Slot)
                 {
-                    if (ownerPrefs is { SeeOwn: false })
+                    if (disabled || ownerPrefs is { SeeOwn: false })
                         info.TransmitEntities.Remove((int)pet.Prop.Index);
                     continue;
                 }
@@ -768,7 +774,7 @@ public class Pet : VipFeatureBase
                     _ => true
                 };
 
-                if (!ownerAllows || !viewerAllows)
+                if (disabled || hideOthers || !ownerAllows || !viewerAllows)
                     info.TransmitEntities.Remove((int)pet.Prop.Index);
             }
         }

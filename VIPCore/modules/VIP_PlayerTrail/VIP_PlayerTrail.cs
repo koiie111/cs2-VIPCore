@@ -187,6 +187,9 @@ public class PlayerTrail : VipFeatureBase
 
         plugin.RegisterListener<Listeners.OnTick>(OnTick);
         plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        // Entity destruction belongs to the game loop, outside snapshot construction.
+        plugin.AddTimer(0.25f, () => { if (!_stopped && FxFilterBridge.Disabled(0)) RemoveServerEffects(); },
+            CounterStrikeSharp.API.Modules.Timers.TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnEntityDeleted>(entity => Untrack(entity.Index));
         plugin.RegisterListener<Listeners.OnMapStart>(_ =>
         {
@@ -503,15 +506,22 @@ public class PlayerTrail : VipFeatureBase
             set?.Clear();
     }
 
+    private void RemoveServerEffects()
+    {
+        for (var slot = 0; slot < _states.Length; slot++) Remove(slot);
+        foreach (var index in _entityOwner.Keys.ToArray())
+        {
+            var entity = Utilities.GetEntityFromIndex<CBaseEntity>((int)index);
+            if (entity is { IsValid: true } && entity.DesignerName is "env_beam" or "info_particle_system")
+                entity.Remove();
+        }
+    }
+
     /// <summary>Strips trail entities from each viewer's snapshot according to both visibility settings.</summary>
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
+        var disabled = FxFilterBridge.Disabled(0);
         if (_stopped || _entityOwner.Count == 0) return;
-
-        var restricted = false;
-        for (var slot = 0; slot < _mine.Length && !restricted; slot++)
-            restricted = _mine[slot] != MineMode.All || _others[slot] != OthersMode.All;
-        if (!restricted) return;
 
         Array.Clear(_team);
         foreach (var player in Utilities.GetPlayers())
@@ -523,11 +533,12 @@ public class PlayerTrail : VipFeatureBase
             if (viewer is not { IsValid: true } || viewer.Slot >= _team.Length) continue;
 
             var viewerSlot = viewer.Slot;
+            var hideOthers = FxFilterBridge.Hidden(viewerSlot, 0);
             for (var owner = 0; owner < _entities.Length; owner++)
             {
                 var set = _entities[owner];
-                if (set is not { Count: > 0 } || owner == viewerSlot) continue;
-                if (CanSee(owner, viewerSlot)) continue;
+                if (set is not { Count: > 0 } || (owner == viewerSlot && !disabled)) continue;
+                if (!disabled && !hideOthers && CanSee(owner, viewerSlot)) continue;
 
                 foreach (var index in set)
                     info.TransmitEntities.Remove((int)index);
@@ -562,6 +573,7 @@ public class PlayerTrail : VipFeatureBase
 
     private void CreateBeam(int owner, Vector from, Vector to, Color color, float width, float lifetime)
     {
+        if (FxFilterBridge.Disabled(0)) return;
         var beam = Utilities.CreateEntityByName<CEnvBeam>("env_beam");
         if (beam == null || !beam.IsValid) return;
 
@@ -626,7 +638,7 @@ public class PlayerTrail : VipFeatureBase
 
     private static CParticleSystem? CreateParticle(ParticleEntry entry, Vector start, QAngle angles)
     {
-        if (entry.File.Length == 0) return null;
+        if (FxFilterBridge.Disabled(0) || entry.File.Length == 0) return null;
 
         var particle = Utilities.CreateEntityByName<CParticleSystem>("info_particle_system");
         if (particle == null || !particle.IsValid) return null;

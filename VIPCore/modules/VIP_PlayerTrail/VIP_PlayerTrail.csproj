@@ -16,4 +16,8 @@
     </Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="../Shared/FxFilterBridge.cs" Link="FxFilterBridge.cs" />
+    <Reference Include="FxFilterApi"><HintPath>../../FxFilterApi.dll</HintPath><Private>False</Private></Reference>
+  </ItemGroup>
 </Project>

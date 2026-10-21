@@ -82,7 +82,7 @@ public class RainbowModel : VipFeatureBase
         foreach (var timer in _timers.Values) timer.Kill();
         _timers.Clear();
     }
-    private bool Allowed(CCSPlayerController player) => player.IsValid && IsClientVip(player)
+    private bool Allowed(CCSPlayerController player) => !FxFilterBridge.RainbowDisabled() && player.IsValid && IsClientVip(player)
         && PlayerHasFeature(player) && GetFeatureValue<bool>(player)
         && GetPlayerFeatureState(player) == FeatureState.Enabled;
 

@@ -1,4 +1,5 @@
 using CounterStrikeSharp.API;
+using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using Microsoft.Extensions.Logging;
@@ -17,7 +18,12 @@ public class VipKillIcon : BasePlugin
     private KillIcon? _feature;
     private bool _unloaded;
 
-    public override void Load(bool hotReload) => Server.NextWorldUpdate(Initialize);
+    // Enable only after validating death notices on a test server with two clients.
+    public readonly FakeConVar<bool> PerClient = new("fx_killicon_per_client", "Experimental per-client death notices", false);
+    public override void Load(bool hotReload)
+    {
+        Server.NextWorldUpdate(Initialize);
+    }
     public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
     private void Initialize()
     {
@@ -30,7 +36,7 @@ public class VipKillIcon : BasePlugin
     private void Register()
     {
         if (_unloaded || _api == null || _feature != null) return;
-        _feature = new KillIcon(this, _api);
+        _feature = new KillIcon(this, _api, () => PerClient.Value);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
         foreach (var player in Utilities.GetPlayers())
             if (player is { IsValid: true, IsBot: false } && _api.IsClientVip(player))
@@ -63,8 +69,12 @@ public class KillIcon : VipFeatureBase
         ["m4a1"] = "M4A4", ["m4a1_silencer"] = "M4A1-S", ["deagle"] = "Desert Eagle",
         ["ssg08"] = "SSG 08", ["p90"] = "P90", ["negev"] = "Negev"
     };
-    public KillIcon(BasePlugin plugin, IVipCoreApi api) : base(api) =>
+    private readonly Func<bool> _perClient;
+    public KillIcon(BasePlugin plugin, IVipCoreApi api, Func<bool> perClient) : base(api)
+    {
+        _perClient = perClient;
         plugin.RegisterEventHandler<EventPlayerDeath>(OnDeath, HookMode.Pre);
+    }
 
     private bool Allowed(CCSPlayerController player) => player.IsValid && !player.IsBot
         && IsClientVip(player) && PlayerHasFeature(player)
@@ -97,8 +107,28 @@ public class KillIcon : VipFeatureBase
         if (attacker == null || victim == null || !victim.IsValid || attacker.Slot == victim.Slot || !Allowed(attacker))
             return HookResult.Continue;
         var icon = GetPlayerCookie<string>(attacker.SteamID, Cookie);
-        if (!string.IsNullOrEmpty(icon) && Icons.ContainsKey(icon) && Choices(attacker).Contains(icon))
-            ev.Weapon = icon;
+        if (FxFilterBridge.Disabled(3) || string.IsNullOrEmpty(icon) || !Icons.ContainsKey(icon) || !Choices(attacker).Contains(icon))
+            return HookResult.Continue;
+        var original = ev.Weapon;
+        if (_perClient())
+        {
+            var viewers = Utilities.GetPlayers().Where(p => p.IsValid && !p.IsBot && !p.IsHLTV).ToList();
+            if (viewers.Any(p => p.Slot != attacker.Slot && FxFilterBridge.Hidden(p.Slot, 3)))
+            {
+                info.DontBroadcast = true;
+                try
+                {
+                    foreach (var viewer in viewers)
+                    {
+                        ev.Weapon = viewer.Slot != attacker.Slot && FxFilterBridge.Hidden(viewer.Slot, 3) ? original : icon;
+                        ev.FireEventToClient(viewer);
+                    }
+                }
+                finally { ev.Weapon = original; }
+                return HookResult.Continue;
+            }
+        }
+        ev.Weapon = icon;
         return HookResult.Continue;
     }
 }
