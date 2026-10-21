@@ -15,17 +15,19 @@ public class VipPlayerParticle : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Particle";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleDescription => "Attaches a selectable particle effect to VIP players";
 
     private PlayerParticle? _feature;
     private IVipCoreApi? _api;
+    private bool _resourcesReady;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     public override void Load(bool hotReload)
     {
         // Particle files must be precached on map load, so this listener lives on the plugin itself.
         RegisterListener<Listeners.OnServerPrecacheResources>(PrecacheParticles);
+        RegisterListener<Listeners.OnMapEnd>(() => _resourcesReady = false);
         Server.NextWorldUpdate(Initialize);
     }
 
@@ -44,7 +46,7 @@ public class VipPlayerParticle : BasePlugin
     private void RegisterFeature()
     {
         if (_api == null || _feature != null) return;
-        _feature = new PlayerParticle(this, _api);
+        _feature = new PlayerParticle(this, _api, () => _resourcesReady);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
     }
 
@@ -65,6 +67,7 @@ public class VipPlayerParticle : BasePlugin
     /// </summary>
     private void PrecacheParticles(ResourceManifest manifest)
     {
+        _resourcesReady = false;
         var dir = _api?.CoreConfigDirectory ?? Path.Combine(Application.RootDirectory, "configs/plugins/VIPCore/");
         var path = Path.Combine(dir, "vip.json");
         if (!File.Exists(path)) return;
@@ -92,6 +95,7 @@ public class VipPlayerParticle : BasePlugin
 
             foreach (var file in files)
                 manifest.AddResource(file);
+            _resourcesReady = true;
         }
         catch (Exception e)
         {
@@ -148,9 +152,11 @@ public class PlayerParticle : VipFeatureBase
     private readonly CParticleSystem?[] _active = new CParticleSystem?[MaxPlayers];
     private readonly int[] _team = new int[MaxPlayers];
     private bool _stopped;
+    private readonly Func<bool> _resourcesReady;
 
-    public PlayerParticle(BasePlugin plugin, IVipCoreApi api) : base(api)
+    public PlayerParticle(BasePlugin plugin, IVipCoreApi api, Func<bool> resourcesReady) : base(api)
     {
+        _resourcesReady = resourcesReady;
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
             var player = ev.Userid;
@@ -395,6 +401,10 @@ public class PlayerParticle : VipFeatureBase
         if (_stopped || player is not { IsValid: true } || player.IsBot || player.Slot >= MaxPlayers) return;
 
         Remove(player.Slot);
+
+        // A live load missed this map's precache callback. Wait for the next map
+        // instead of creating entities with resources clients have not received.
+        if (!_resourcesReady()) return;
 
         var pawn = player.PlayerPawn.Value;
         if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE) return;
