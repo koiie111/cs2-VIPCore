@@ -523,6 +523,10 @@ public class PlayerTrail : VipFeatureBase
         var disabled = FxFilterBridge.Disabled(0);
         if (_stopped || _entityOwner.Count == 0) return;
 
+        var restricted = disabled;
+        for (var slot = 0; slot < _mine.Length && !restricted; slot++)
+            restricted = _mine[slot] != MineMode.All || _others[slot] != OthersMode.All;
+
         Array.Clear(_team);
         foreach (var player in Utilities.GetPlayers())
             if (player.Slot < _team.Length)
@@ -534,6 +538,8 @@ public class PlayerTrail : VipFeatureBase
 
             var viewerSlot = viewer.Slot;
             var hideOthers = FxFilterBridge.Hidden(viewerSlot, 0);
+            // Without old visibility settings only viewers who hid trails via !fx need work.
+            if (!restricted && !hideOthers) continue;
             for (var owner = 0; owner < _entities.Length; owner++)
             {
                 var set = _entities[owner];
