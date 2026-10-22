@@ -6,14 +6,14 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v10.0": {
-      "VIP_Test_Lifetime_2_1_0/1.0.0": {
+      "VIP_Test_PlayTime_3_0_0/1.0.0": {
         "dependencies": {
           "CounterStrikeSharp.API": "1.0.376",
           "Dapper": "2.1.35",
           "MySqlConnector": "2.3.7"
         },
         "runtime": {
-          "VIP_Test_Lifetime_2_1_0.dll": {}
+          "VIP_Test_PlayTime_3_0_0.dll": {}
         }
       },
       "CounterStrikeSharp.API/1.0.376": {
@@ -547,7 +547,7 @@
     }
   },
   "libraries": {
-    "VIP_Test_Lifetime_2_1_0/1.0.0": {
+    "VIP_Test_PlayTime_3_0_0/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

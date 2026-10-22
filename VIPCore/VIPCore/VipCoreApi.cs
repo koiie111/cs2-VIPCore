@@ -270,6 +270,15 @@ public class VipCoreApi : IVipCoreApi
         Task.Run(() => RemoveClientVipAsync(steamId));
     }
 
+    public void EndTemporaryVip(CCSPlayerController player)
+    {
+        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user)) return;
+
+        OnPlayerRemoved(player, user.group);
+        _vipCore.IsClientVip[player.Slot] = false;
+        _vipCore.Users.Remove(player.SteamID, out _);
+    }
+
     private async Task RemoveClientVipAsync(SteamID steamId)
     {
         try

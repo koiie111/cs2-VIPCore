@@ -168,6 +168,14 @@ public interface IVipCoreApi
     void RemoveClientVip(CCSPlayerController player);
 
     /// <summary>
+    /// Ends a VIP granted with <see cref="GiveClientTemporaryVip"/> right now, in memory only.
+    /// Unlike <see cref="RemoveClientVip"/> it never deletes a database row, so a privilege the
+    /// player bought meanwhile stays intact. Does nothing if the player has no loaded VIP.
+    /// </summary>
+    /// <param name="player"></param>
+    void EndTemporaryVip(CCSPlayerController player);
+
+    /// <summary>
     /// Saves the player's cookie
     /// </summary>
     /// <param name="steamId64"></param>

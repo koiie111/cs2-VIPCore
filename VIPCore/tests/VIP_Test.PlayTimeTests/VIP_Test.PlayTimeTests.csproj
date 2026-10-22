@@ -8,7 +8,8 @@
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.35" />
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
-    <Compile Include="../../modules/VIP_Test/LifetimeTrialStore.cs" Link="LifetimeTrialStore.cs" />
+    <Compile Include="../../modules/VIP_Test/TrialStore.cs" Link="TrialStore.cs" />
+    <Compile Include="../../modules/VIP_Test/TrialClock.cs" Link="TrialClock.cs" />
     <Compile Include="../../modules/VIP_Test/TrialTime.cs" Link="TrialTime.cs" />
   </ItemGroup>
 </Project>
