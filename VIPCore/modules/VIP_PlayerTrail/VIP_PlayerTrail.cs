@@ -23,8 +23,15 @@ public class VipPlayerTrail : BasePlugin
     private IVipCoreApi? _api;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
+    private bool _mapRunning;
+
     public override void Load(bool hotReload)
     {
+        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
+        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
+        _mapRunning = hotReload;
+        RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
+        RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
         // Particle files must be precached on map load, so this listener lives on the plugin itself.
         RegisterListener<Listeners.OnServerPrecacheResources>(PrecacheParticles);
         Server.NextWorldUpdate(Initialize);
@@ -45,7 +52,7 @@ public class VipPlayerTrail : BasePlugin
     private void RegisterFeature()
     {
         if (_api == null || _trail != null) return;
-        _trail = new PlayerTrail(this, _api);
+        _trail = new PlayerTrail(this, _api, _mapRunning);
         _api.RegisterFeature(_trail, FeatureType.Selectable);
     }
 
@@ -180,7 +187,7 @@ public class PlayerTrail : VipFeatureBase
     private int _tick;
     private bool _stopped;
 
-    public PlayerTrail(BasePlugin plugin, IVipCoreApi api) : base(api)
+    public PlayerTrail(BasePlugin plugin, IVipCoreApi api, bool mapRunning) : base(api)
     {
         _plugin = plugin;
         RollRoundColors();
@@ -224,7 +231,13 @@ public class PlayerTrail : VipFeatureBase
             return HookResult.Continue;
         });
 
-        // Module loaded on a live server: pick up VIPs already in game.
+        // Module loaded on a live server: pick up VIPs already in game. On a cold start the map (and any player)
+        // does not exist yet; VIPCore calls OnPlayerLoaded for players that join later.
+        if (mapRunning) SyncOnlinePlayers();
+    }
+
+    private void SyncOnlinePlayers()
+    {
         foreach (var player in Utilities.GetPlayers())
         {
             if (player.IsBot || !IsClientVip(player)) continue;

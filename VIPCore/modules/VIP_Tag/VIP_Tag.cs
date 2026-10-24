@@ -24,7 +24,17 @@ public class VIPTag : BasePlugin
 
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
-    public override void Load(bool hotReload) => Server.NextWorldUpdate(Initialize);
+    private bool _mapRunning;
+
+    public override void Load(bool hotReload)
+    {
+        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
+        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
+        _mapRunning = hotReload;
+        RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
+        RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
+        Server.NextWorldUpdate(Initialize);
+    }
 
     public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
 
@@ -46,9 +56,14 @@ public class VIPTag : BasePlugin
         _api.RegisterFeature(_tag, FeatureType.Toggle);
         _api.RegisterFeature(_color, FeatureType.Selectable);
         _api.RegisterFeature(_messageColor, FeatureType.Selectable);
-        // VIPCore builds online users' feature states on authorization, not on module registration.
+        if (_mapRunning) ReloadOnlineVips();
+    }
+
+    // VIPCore builds online users' feature states on authorization, not on module registration.
+    private void ReloadOnlineVips()
+    {
         foreach (var player in Utilities.GetPlayers())
-            if (player is { IsValid: true, IsBot: false } && _api.IsClientVip(player))
+            if (player is { IsValid: true, IsBot: false } && _api!.IsClientVip(player))
                 Server.ExecuteCommand($"css_reload_vip_player {player.SteamID}");
     }
 

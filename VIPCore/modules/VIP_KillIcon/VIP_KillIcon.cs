@@ -17,7 +17,17 @@ public class VipKillIcon : BasePlugin
     private KillIcon? _feature;
     private bool _unloaded;
 
-    public override void Load(bool hotReload) => Server.NextWorldUpdate(Initialize);
+    private bool _mapRunning;
+
+    public override void Load(bool hotReload)
+    {
+        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
+        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
+        _mapRunning = hotReload;
+        RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
+        RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
+        Server.NextWorldUpdate(Initialize);
+    }
     public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
     private void Initialize()
     {
@@ -32,10 +42,14 @@ public class VipKillIcon : BasePlugin
         if (_unloaded || _api == null || _feature != null) return;
         _feature = new KillIcon(this, _api);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
-        foreach (var player in Utilities.GetPlayers())
-            if (player is { IsValid: true, IsBot: false } && _api.IsClientVip(player))
-                Server.ExecuteCommand($"css_reload_vip_player {player.SteamID}");
+        if (_mapRunning) ReloadOnlineVips();
         Logger.LogInformation("KillIcon registered with player selection");
+    }
+    private void ReloadOnlineVips()
+    {
+        foreach (var player in Utilities.GetPlayers())
+            if (player is { IsValid: true, IsBot: false } && _api!.IsClientVip(player))
+                Server.ExecuteCommand($"css_reload_vip_player {player.SteamID}");
     }
     public override void Unload(bool hotReload)
     {

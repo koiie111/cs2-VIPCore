@@ -23,8 +23,15 @@ public class VipPostprocessing : BasePlugin
     private IVipCoreApi? _api;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
+    private bool _mapRunning;
+
     public override void Load(bool hotReload)
     {
+        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
+        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
+        _mapRunning = hotReload;
+        RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
+        RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
         // Post-processing resources must be precached on map load, so this listener lives on the plugin itself.
         RegisterListener<Listeners.OnServerPrecacheResources>(PrecacheResources);
         Server.NextWorldUpdate(Initialize);
@@ -45,7 +52,7 @@ public class VipPostprocessing : BasePlugin
     private void RegisterFeature()
     {
         if (_api == null || _feature != null) return;
-        _feature = new Postprocessing(this, _api);
+        _feature = new Postprocessing(this, _api, _mapRunning);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
     }
 
@@ -159,7 +166,7 @@ public class Postprocessing : VipFeatureBase
     private readonly List<CPostProcessingVolume> _mapVolumes = new();
     private bool _stopped;
 
-    public Postprocessing(BasePlugin plugin, IVipCoreApi api) : base(api)
+    public Postprocessing(BasePlugin plugin, IVipCoreApi api, bool mapRunning) : base(api)
     {
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
@@ -197,7 +204,13 @@ public class Postprocessing : VipFeatureBase
             _prefs.Remove(slot);
         });
 
-        // Module loaded on a live server: pick up VIPs already in game.
+        // Module loaded on a live server: pick up VIPs already in game. On a cold start the map does not exist yet
+        // (nothing to enumerate); volumes are collected at the first round start.
+        if (mapRunning) SyncLiveState();
+    }
+
+    private void SyncLiveState()
+    {
         RefreshMapVolumes();
         foreach (var player in Utilities.GetPlayers())
             if (!player.IsBot && IsClientVip(player))
