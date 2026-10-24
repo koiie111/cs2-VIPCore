@@ -2,6 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- A distinct release identity supports live updates when the loader retains the old assembly. -->
+    <AssemblyName>VIP_Postprocessing_4ill_1_0_1</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
@@ -16,4 +18,14 @@
     </Reference>
   </ItemGroup>
 
+  <Target Name="CopyAutoLoadEntryPoint" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(TargetDir)VIP_Postprocessing.dll" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).deps.json" DestinationFiles="$(TargetDir)VIP_Postprocessing.deps.json" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(TargetDir)VIP_Postprocessing.pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+  </Target>
+  <Target Name="PublishAutoLoadEntryPoint" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).dll" DestinationFiles="$(PublishDir)VIP_Postprocessing.dll" />
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).deps.json" DestinationFiles="$(PublishDir)VIP_Postprocessing.deps.json" />
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).pdb" DestinationFiles="$(PublishDir)VIP_Postprocessing.pdb" Condition="Exists('$(PublishDir)$(AssemblyName).pdb')" />
+  </Target>
 </Project>
