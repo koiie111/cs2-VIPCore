@@ -94,3 +94,14 @@
 - `required` проверяется через `AdminManager.PlayerHasPermissions` CounterStrikeSharp.
 - Эффект не создаётся для ботов.
 - Оригинал по умолчанию показывал эффект зрителям всегда; здесь это можно отключить.
+
+
+## 1.0.3 safety update
+
+Effects are disabled until explicitly selected. Missing or unavailable saved choices do not select the first effect. Cookies remain unchanged. The cold-start map lifecycle fix is retained.
+
+Plugin volumes are tracked before spawning and become master volumes only after successful setup. A failed setup removes the volume. Startup, round start, unload, and a periodic sweep remove orphaned `vipcore_postprocessing` volumes; map-authored volumes are retained. Observer target validation fails closed per recipient, so an invalid target cannot skip filtering for other clients.
+
+`css_postprocessing_status` is server-console-only and reports active/owned/orphan counts and filter errors. The release has a distinct assembly name for safe managed loader replacement, with `VIP_Postprocessing.dll` as the canonical entry point. Unload existing instances before replacing files, check automatic loading before issuing a manual load, and verify exactly one loaded 1.0.3 module. Do not load the release DLL as a second plugin.
+
+Validation: `dotnet build modules/VIP_Postprocessing -c Release` and `dotnet run --project tests/VIP_Postprocessing.PolicyTests -c Release`. Human in-game acceptance is still needed for the appearance of explicitly selected filters.

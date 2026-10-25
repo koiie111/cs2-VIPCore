@@ -5,6 +5,7 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Admin;
+using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using VipCoreApi;
@@ -16,17 +17,29 @@ public class VipPostprocessing : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Postprocessing";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.3";
     public override string ModuleDescription => "Selectable screen post-processing (color grading) for VIP players";
 
     private Postprocessing? _feature;
     private IVipCoreApi? _api;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
+    private bool _mapRunning;
+
     public override void Load(bool hotReload)
     {
+        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
+        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
+        _mapRunning = hotReload || !string.IsNullOrEmpty(Server.MapName);
+        RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
+        RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
         // Post-processing resources must be precached on map load, so this listener lives on the plugin itself.
         RegisterListener<Listeners.OnServerPrecacheResources>(PrecacheResources);
+        AddCommand("css_postprocessing_status", "Server-console-only postprocessing safety diagnostics", (player, command) =>
+        {
+            if (player != null) return;
+            command.ReplyToCommand(_feature?.Diagnostics() ?? "Postprocessing 1.0.3: feature not ready");
+        });
         Server.NextWorldUpdate(Initialize);
     }
 
@@ -45,7 +58,7 @@ public class VipPostprocessing : BasePlugin
     private void RegisterFeature()
     {
         if (_api == null || _feature != null) return;
-        _feature = new Postprocessing(this, _api);
+        _feature = new Postprocessing(this, _api, _mapRunning);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
     }
 
@@ -157,10 +170,28 @@ public class Postprocessing : VipFeatureBase
     private readonly Dictionary<int, Prefs> _prefs = new();
     private readonly CPostProcessingVolume?[] _active = new CPostProcessingVolume?[MaxPlayers];
     private readonly List<CPostProcessingVolume> _mapVolumes = new();
+    private readonly BasePlugin _plugin;
+    private bool _mapRunning;
+    private int _purged;
+    private long _blocked;
+    private long _transmitErrors;
     private bool _stopped;
 
-    public Postprocessing(BasePlugin plugin, IVipCoreApi api) : base(api)
+    public Postprocessing(BasePlugin plugin, IVipCoreApi api, bool mapRunning) : base(api)
     {
+        _plugin = plugin;
+        _mapRunning = mapRunning;
+        plugin.AddTimer(2f, () =>
+        {
+            if (_stopped || !_mapRunning) return;
+            PurgeOrphans();
+        }, TimerFlags.REPEAT);
+        plugin.RegisterListener<Listeners.OnMapEnd>(() =>
+        {
+            _mapRunning = false;
+            Array.Clear(_active);
+            _mapVolumes.Clear();
+        });
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
             var player = ev.Userid;
@@ -182,14 +213,17 @@ public class Postprocessing : VipFeatureBase
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
             RemoveAll();
+            PurgeOrphans();
             RefreshMapVolumes();
             return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
         plugin.RegisterListener<Listeners.OnMapStart>(_ =>
         {
+            _mapRunning = true;
             Array.Clear(_active);
             _mapVolumes.Clear();
+            Server.NextFrame(() => { if (!_stopped && _mapRunning) SyncLiveState(); });
         });
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
@@ -197,7 +231,14 @@ public class Postprocessing : VipFeatureBase
             _prefs.Remove(slot);
         });
 
-        // Module loaded on a live server: pick up VIPs already in game.
+        // Module loaded on a live server: pick up VIPs already in game. On a cold start the map does not exist yet
+        // (nothing to enumerate); volumes are collected at the first round start.
+        if (mapRunning) SyncLiveState();
+    }
+
+    private void SyncLiveState()
+    {
+        PurgeOrphans();
         RefreshMapVolumes();
         foreach (var player in Utilities.GetPlayers())
             if (!player.IsBot && IsClientVip(player))
@@ -209,6 +250,7 @@ public class Postprocessing : VipFeatureBase
     {
         _stopped = true;
         RemoveAll();
+        if (_mapRunning) PurgeOrphans();
         _mapVolumes.Clear();
         _prefs.Clear();
     }
@@ -392,8 +434,8 @@ public class Postprocessing : VipFeatureBase
     private PostprocessingEntry? Current(CCSPlayerController player, List<PostprocessingEntry> entries)
     {
         var saved = Load(player).Effect;
-        if (saved == Off) return null;
-        return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
+        if (!PostprocessingPolicy.HasExplicitEffect(saved)) return null;
+        return entries.FirstOrDefault(e => e.Name == saved);
     }
 
     private List<PostprocessingEntry>? TryGetEntries(CCSPlayerController player)
@@ -431,7 +473,8 @@ public class Postprocessing : VipFeatureBase
 
     private void Apply(CCSPlayerController? player)
     {
-        if (_stopped || player is not { IsValid: true } || player.IsBot || player.Slot >= MaxPlayers) return;
+        if (_stopped || !_mapRunning || player is not { IsValid: true } || player.IsBot ||
+            player.Slot < 0 || player.Slot >= MaxPlayers) return;
 
         Remove(player.Slot);
 
@@ -454,7 +497,8 @@ public class Postprocessing : VipFeatureBase
         var keys = new CEntityKeyValues();
         keys.SetString("targetname", VolumeName);
         keys.SetString("postprocessing", entry.File);
-        keys.SetBool("master", true);
+        // Never spawn an untracked global master, even for one frame.
+        keys.SetBool("master", false);
         keys.SetBool("enableexposure", prefs.Exposure);
         keys.SetFloat("fadetime", Math.Max(prefs.Fade ?? entry.Fade, 0f));
         keys.SetFloat("minexposure", exposure.Min);
@@ -465,13 +509,21 @@ public class Postprocessing : VipFeatureBase
         keys.SetInt("spawnflags", 4097);
         keys.SetVector("origin", origin);
 
-        volume.DispatchSpawn(keys);
-        keys.Dispose();
-
-        if (!volume.IsValid) return;
-
-        volume.AcceptInput("SetParent", pawn, null, "!activator");
         _active[player.Slot] = volume;
+        try
+        {
+            volume.DispatchSpawn(keys);
+            if (!volume.IsValid) { Remove(player.Slot); return; }
+            volume.AcceptInput("SetParent", pawn, null, "!activator");
+            volume.Master = true;
+            Utilities.SetStateChanged(volume, "CPostProcessingVolume", "m_bMaster");
+        }
+        catch (Exception error)
+        {
+            Remove(player.Slot);
+            _plugin.Logger.LogError(error, "Postprocessing spawn failed; effect removed");
+        }
+        finally { keys.Dispose(); }
     }
 
     private void RemoveAll()
@@ -487,7 +539,7 @@ public class Postprocessing : VipFeatureBase
         var volume = _active[slot];
         _active[slot] = null;
 
-        if (volume is { IsValid: true } && volume.DesignerName == VolumeClass)
+        if (volume is { IsValid: true } && volume.DesignerName == VolumeClass && IsOwned(volume))
             volume.Remove();
     }
 
@@ -496,7 +548,7 @@ public class Postprocessing : VipFeatureBase
     {
         _mapVolumes.Clear();
         foreach (var volume in Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass))
-            if (volume.IsValid && !string.Equals(volume.Entity?.Name, VolumeName, StringComparison.Ordinal))
+            if (volume.IsValid && !IsOwned(volume))
                 _mapVolumes.Add(volume);
     }
 
@@ -506,51 +558,73 @@ public class Postprocessing : VipFeatureBase
     /// A player's volume is sent only to that player (and to spectators watching them, if the owner allows it);
     /// everyone else gets it stripped from their snapshot.
     /// </summary>
+    private static bool IsOwned(CPostProcessingVolume volume) =>
+        string.Equals(volume.Entity?.Name, VolumeName, StringComparison.Ordinal);
+
+    private void PurgeOrphans()
+    {
+        foreach (var volume in Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass).ToArray())
+        {
+            if (!volume.IsValid || !IsOwned(volume)) continue;
+            if (_active.Any(active => active is { IsValid: true } && active.Handle == volume.Handle)) continue;
+            volume.Remove();
+            _purged++;
+        }
+    }
+
+    public string Diagnostics()
+    {
+        if (!_mapRunning) return "Postprocessing 1.0.3: waiting for map";
+        var owned = Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass)
+            .Count(volume => volume.IsValid && IsOwned(volume));
+        var active = _active.Count(volume => volume is { IsValid: true });
+        return $"Postprocessing 1.0.3: default=off active={active} owned={owned} orphan={owned - active} purged={_purged} blocked={_blocked} transmitErrors={_transmitErrors}";
+    }
+
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
         if (_stopped) return;
-
-        var any = false;
-        foreach (var volume in _active)
-            if (volume != null) { any = true; break; }
-        if (!any) return;
-
         foreach (var (info, viewer) in infoList)
         {
-            if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
-
-            // Whose screen this viewer is looking at: their own, or the player they spectate.
-            var shown = viewer.Slot;
-            var spectating = false;
-            if (!viewer.PawnIsAlive)
+            var shown = -1;
+            try
             {
-                var target = viewer.Pawn.Value?.ObserverServices?.ObserverTarget.Value;
-                var observed = target is { IsValid: true } ? target.As<CCSPlayerPawn>().OriginalController.Value : null;
-                if (observed is { IsValid: true } && observed.Slot >= 0 && observed.Slot < MaxPlayers)
+                if (viewer is { IsValid: true } && viewer.Slot >= 0 && viewer.Slot < MaxPlayers)
                 {
-                    shown = observed.Slot;
-                    spectating = true;
+                    shown = viewer.PawnIsAlive ? viewer.Slot : -1;
+                    if (!viewer.PawnIsAlive)
+                    {
+                        // Observer targets can be entities other than a player pawn. Do not cast those.
+                        var target = viewer.Pawn.Value?.ObserverServices?.ObserverTarget.Value;
+                        if (target is { IsValid: true } && target.DesignerName == "player")
+                        {
+                            var observed = target.As<CCSPlayerPawn>().OriginalController.Value;
+                            if (observed is { IsValid: true } && observed.Slot >= 0 && observed.Slot < MaxPlayers &&
+                                _prefs.GetValueOrDefault(observed.Slot) is { Spectators: true })
+                                shown = observed.Slot;
+                        }
+                    }
                 }
             }
-
-            if (spectating && _prefs.GetValueOrDefault(shown) is { Spectators: false })
+            catch (Exception)
+            {
+                // An invalid observer must never abort filtering for the rest of the recipients.
                 shown = -1;
+                _transmitErrors++;
+            }
 
             for (var owner = 0; owner < MaxPlayers; owner++)
             {
-                if (owner == shown) continue;
-
                 var volume = _active[owner];
-                if (volume != null && volume.IsValid)
-                    info.TransmitEntities.Remove((int)volume.Index);
+                if (volume is not { IsValid: true }) continue;
+                if (PostprocessingPolicy.CanTransmit(owner, shown)) continue;
+                info.TransmitEntities.Remove((int)volume.Index);
+                _blocked++;
             }
-
-            if (shown < 0 || _active[shown] == null) continue;
-            if (_prefs.GetValueOrDefault(shown) is not { ReplaceMap: true }) continue;
-
+            if (shown < 0 || _active[shown] is not { IsValid: true } ||
+                _prefs.GetValueOrDefault(shown) is not { ReplaceMap: true }) continue;
             foreach (var mapVolume in _mapVolumes)
-                if (mapVolume.IsValid)
-                    info.TransmitEntities.Remove((int)mapVolume.Index);
+                if (mapVolume.IsValid) info.TransmitEntities.Remove((int)mapVolume.Index);
         }
     }
 }

@@ -2,12 +2,13 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>VIP_Postprocessing_4ill_1_0_3</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.376" />
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.378" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="VipCoreApi">
@@ -16,4 +17,9 @@
     </Reference>
   </ItemGroup>
 
+  <Target Name="CopyAutoLoadEntryPoint" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(TargetDir)VIP_Postprocessing.dll" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).deps.json" DestinationFiles="$(TargetDir)VIP_Postprocessing.deps.json" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(TargetDir)VIP_Postprocessing.pdb" />
+  </Target>
 </Project>
