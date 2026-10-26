@@ -1,4 +1,4 @@
-﻿using CounterStrikeSharp.API;
+using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Commands;
@@ -12,9 +12,9 @@ public class VipBuyTeamWeapon : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] BuyTeamWeapon";
-    public override string ModuleVersion => "v1.0.0";
+    public override string ModuleVersion => "1.0.3";
     
-    private BuyTeamWeapon _buyTeamWeapon;
+    private BuyTeamWeapon? _buyTeamWeapon;
     private IVipCoreApi? _api;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -29,15 +29,45 @@ public class VipBuyTeamWeapon : BasePlugin
     
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_buyTeamWeapon);
+        if (_buyTeamWeapon != null)
+        {
+            _buyTeamWeapon.Stop();
+            _api?.UnRegisterFeature(_buyTeamWeapon);
+        }
     }
 }
 
 public class BuyTeamWeapon : VipFeatureBase
 {
     public override string Feature => "BuyTeamWeapon";
+    private readonly Dictionary<int, IntPtr> _readyPawns = new();
+    private bool _stopped;
+
+    public void Stop()
+    {
+        _stopped = true;
+        Api.OnPlayerSpawn -= OnPlayerSpawn;
+        Api.PlayerLoaded -= OnPlayerLoaded;
+        Api.PlayerRemoved -= OnPlayerRemoved;
+        _readyPawns.Clear();
+    }
+
     public BuyTeamWeapon(BasePlugin basePlugin, IVipCoreApi api) : base(api)
     {
+        // Players already alive during hot loading have received their spawn bonuses.
+        foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p.PawnIsAlive))
+            if (player.PlayerPawn.Value is { } pawn) _readyPawns[player.Slot] = pawn.Handle;
+        basePlugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
+        {
+            if (ev.Userid is { } player) _readyPawns.Remove(player.Slot);
+            return HookResult.Continue;
+        }, HookMode.Pre);
+        basePlugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot => _readyPawns.Remove(slot));
+        basePlugin.AddCommand("css_buyteamweapon_status", "Purchase diagnostics", (player, info) =>
+        {
+            if (player != null) return;
+            info.ReplyToCommand($"BuyTeamWeapon 1.0.3 spawn_gate=on account_sync=on ready={_readyPawns.Count}");
+        });
         basePlugin.RegisterEventHandler<EventRoundStart>(EventRoundStart);
         
         basePlugin.AddCommand("css_ak47", "buy ak47", (player, _) => BuyWeapon(player, "weapon_ak47", 2700));
@@ -47,6 +77,19 @@ public class BuyTeamWeapon : VipFeatureBase
         basePlugin.AddCommand("css_usp", "buy usp", (player, _) => BuyWeapon(player, "weapon_usp_silencer", 200));
     }
     
+    public override void OnPlayerSpawn(CCSPlayerController player)
+    {
+        var pawnHandle = player.PlayerPawn.Value?.Handle;
+        // VIPCore invokes all spawn features synchronously. Wait until Money and
+        // every other feature have finished, independent of subscription order.
+        Server.NextFrame(() =>
+        {
+            if (!_stopped && player.IsValid && player.PawnIsAlive && pawnHandle.HasValue &&
+                player.PlayerPawn.Value?.Handle == pawnHandle.Value)
+                _readyPawns[player.Slot] = pawnHandle.Value;
+        });
+    }
+
     private HookResult EventRoundStart(EventRoundStart @event, GameEventInfo info)
     {
         foreach (var player in Utilities.GetPlayers().Where(u => IsClientVip(u) && PlayerHasFeature(u) && GetFeatureValue<bool>(u) && u.PawnIsAlive))
@@ -63,7 +106,7 @@ public class BuyTeamWeapon : VipFeatureBase
 
     private void BuyWeapon(CCSPlayerController? player, string weaponName, int price)
     {
-        if (player is null) return;
+        if (player is null || !player.IsValid) return;
         
         if (!IsClientVip(player) || !PlayerHasFeature(player) || !GetFeatureValue<bool>(player) || !player.PawnIsAlive)
         {
@@ -72,7 +115,13 @@ public class BuyTeamWeapon : VipFeatureBase
         }
 
         var playerPawn = player.PlayerPawn.Value;
-        if (playerPawn is not null && !playerPawn.InBuyZone)
+        if (playerPawn is null || !playerPawn.IsValid) return;
+        if (!_readyPawns.TryGetValue(player.Slot, out var readyPawn) || readyPawn != playerPawn.Handle)
+        {
+            player.PrintToChat("[VIP] Дождитесь выдачи стартовых VIP-бонусов и повторите покупку.");
+            return;
+        }
+        if (!playerPawn.InBuyZone)
         {
             PrintToChat(player, GetTranslatedText("buyteamweapon.in_buy_zone"));
             return;
@@ -88,7 +137,7 @@ public class BuyTeamWeapon : VipFeatureBase
         }
 
         moneySerivce.Account -= price;
-        Utilities.SetStateChanged(player, "CCSPlayerController", "m_pInGameMoneyServices");
+        Utilities.SetStateChanged(player, "CCSPlayerController_InGameMoneyServices", "m_iAccount");
         
         player.GiveNamedItem(weaponName);
     }
