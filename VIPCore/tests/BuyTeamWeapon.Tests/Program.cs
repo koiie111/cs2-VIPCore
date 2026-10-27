@@ -4,11 +4,17 @@ using VIP_BuyTeamWeapon;
 using VipCoreApi;
 var checks=0;
 void Check(bool value) { checks++; if(!value) throw new Exception($"Check {checks} failed"); }
+Utilities.FailGetPlayers=true;
+var startupPlugin=new BasePlugin();
+var startupFeature=new BuyTeamWeapon(startupPlugin,new FakeApi(),false);
+Check(startupPlugin.Commands.ContainsKey("css_ak47"));
+startupFeature.Stop();
+Utilities.FailGetPlayers=false;
 foreach(var moneyFirst in new[]{true,false})
 foreach(var price in new[]{("css_ak47",2700),("css_m4a1",2900),("css_m4a4",3000),("css_glock",200),("css_usp",200)})
 {
  var api=new FakeApi(); var plugin=new BasePlugin(); var p=new CCSPlayerController();
- var feature=new BuyTeamWeapon(plugin,api);
+ var feature=new BuyTeamWeapon(plugin,api,false);
  void Buy()=>plugin.Commands[price.Item1](p,new());
  plugin.Spawn(new(){Userid=p});
  Buy(); Check(p.Given==0 && p.InGameMoneyServices!.Account==10000);
@@ -58,7 +64,7 @@ namespace CounterStrikeSharp.API.Core {
 }
 namespace CounterStrikeSharp.API {
  using CounterStrikeSharp.API.Core;
- public static class Utilities {public static string LastSchema="";public static List<CCSPlayerController> GetPlayers()=>new();public static void SetStateChanged(CCSPlayerController p,string c,string f)=>LastSchema=c+"."+f;}
+ public static class Utilities {public static string LastSchema="";public static bool FailGetPlayers; public static List<CCSPlayerController> GetPlayers()=>FailGetPlayers ? throw new Exception("Global Variables not initialized yet") : new();public static void SetStateChanged(CCSPlayerController p,string c,string f)=>LastSchema=c+"."+f;}
  public static class Server {static Queue<Action> q=new();public static void NextFrame(Action f)=>q.Enqueue(f); public static void Drain(){while(q.TryDequeue(out var f))f();}}
 }
 namespace VipCoreApi {

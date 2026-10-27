@@ -12,7 +12,7 @@ public class VipBuyTeamWeapon : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] BuyTeamWeapon";
-    public override string ModuleVersion => "1.0.3";
+    public override string ModuleVersion => "1.0.4";
     
     private BuyTeamWeapon? _buyTeamWeapon;
     private IVipCoreApi? _api;
@@ -23,7 +23,7 @@ public class VipBuyTeamWeapon : BasePlugin
         _api = PluginCapability.Get();
         if (_api == null) return;
 
-        _buyTeamWeapon = new BuyTeamWeapon(this, _api);
+        _buyTeamWeapon = new BuyTeamWeapon(this, _api, hotReload);
         _api.RegisterFeature(_buyTeamWeapon, FeatureType.Hide);
     }
     
@@ -52,11 +52,12 @@ public class BuyTeamWeapon : VipFeatureBase
         _readyPawns.Clear();
     }
 
-    public BuyTeamWeapon(BasePlugin basePlugin, IVipCoreApi api) : base(api)
+    public BuyTeamWeapon(BasePlugin basePlugin, IVipCoreApi api, bool hotReload) : base(api)
     {
         // Players already alive during hot loading have received their spawn bonuses.
-        foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p.PawnIsAlive))
-            if (player.PlayerPawn.Value is { } pawn) _readyPawns[player.Slot] = pawn.Handle;
+        if (hotReload)
+            foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p.PawnIsAlive))
+                if (player.PlayerPawn.Value is { } pawn) _readyPawns[player.Slot] = pawn.Handle;
         basePlugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
             if (ev.Userid is { } player) _readyPawns.Remove(player.Slot);
@@ -66,7 +67,7 @@ public class BuyTeamWeapon : VipFeatureBase
         basePlugin.AddCommand("css_buyteamweapon_status", "Purchase diagnostics", (player, info) =>
         {
             if (player != null) return;
-            info.ReplyToCommand($"BuyTeamWeapon 1.0.3 spawn_gate=on account_sync=on ready={_readyPawns.Count}");
+            info.ReplyToCommand($"BuyTeamWeapon 1.0.4 spawn_gate=on account_sync=on ready={_readyPawns.Count}");
         });
         basePlugin.RegisterEventHandler<EventRoundStart>(EventRoundStart);
         
