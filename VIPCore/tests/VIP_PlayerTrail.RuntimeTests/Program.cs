@@ -86,6 +86,7 @@ Require(entities.TryTakeExpired(6, out var reused) && reused == 0x18009, "Reused
 Require(entities.OwnedBy(owner).Any(e => e is (0x800a, true)), "Follow survives unrelated expiration");
 entities.Clear();
 Require(entities.Owners == 0 && !entities.HasExpirations && !entities.OwnedBy(owner).Any(), "Map/unload state reset");
+FeatureReloadTests.Run();
 Console.WriteLine("PlayerTrail runtime tests passed.");
 
 if (args.Contains("--benchmark")) ManagedBenchmark.Run();

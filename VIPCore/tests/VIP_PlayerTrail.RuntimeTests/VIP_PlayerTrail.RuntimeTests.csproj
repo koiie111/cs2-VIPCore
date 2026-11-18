@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../VIPCore/VIPCore.csproj" />
     <Compile Include="../../modules/VIP_PlayerTrail/TrailRuntime.cs" Link="TrailRuntime.cs" />
   </ItemGroup>
 </Project>

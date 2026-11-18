@@ -108,10 +108,10 @@ public class VipCore : BasePlugin
         IsClientVip[player.Slot] = false;
         if (Users.TryGetValue(player.SteamID, out var user))
         {
-            foreach (var featureState in user.FeatureState.Where(f =>
-                         Features[f.Key].FeatureType is FeatureType.Toggle))
+            foreach (var (key, state) in user.FeatureState)
             {
-                VipApi.SetPlayerCookie(player.SteamID, featureState.Key, (int)featureState.Value);
+                if (Features.TryGetValue(key, out var feature) && feature.FeatureType is FeatureType.Toggle)
+                    VipApi.SetPlayerCookie(player.SteamID, key, (int)state);
             }
         }
 

@@ -56,6 +56,9 @@ public class VipPlayerTrail : BasePlugin
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeature;
         if (_trail == null) return;
+        _api.OnPlayerSpawn -= _trail.OnPlayerSpawn;
+        _api.PlayerLoaded -= _trail.OnPlayerLoaded;
+        _api.PlayerRemoved -= _trail.OnPlayerRemoved;
         _trail.Stop();
         _api.UnRegisterFeature(_trail);
         _trail = null;

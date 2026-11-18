@@ -71,14 +71,8 @@ public class VipCoreApi : IVipCoreApi
 
     public void UnRegisterFeature(VipFeatureBase vipFeatureBase)
     {
-        foreach (var config in _vipCore.Config.Groups)
-        {
-            if (vipFeatureBase.Feature != null)
-            {
-                config.Value.Values.Remove(vipFeatureBase.Feature);
-                _vipCore.Features.Remove(vipFeatureBase.Feature, out _);
-            }
-        }
+        // Group values belong to vip.json and are needed when the module registers again.
+        _vipCore.Features.TryRemove(vipFeatureBase.Feature, out _);
 
         _vipCore.PrintLogInfo(
             "Feature '{feature}' unregistered successfully", vipFeatureBase.Feature);
