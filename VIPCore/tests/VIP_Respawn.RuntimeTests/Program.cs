@@ -21,6 +21,7 @@ PluginCapability<IVipCoreApi>.Provider = api;
 plugin.Retry!.Fire();
 Server.Pending();
 Check(plugin.Retry.Killed && api.Registered != null && !api.HasListeners, "Single registration, no idle callbacks");
+Check(plugin.Timers.Count == 0, "Dispose must not kill the retired native timer again");
 
 var table = Marshal.AllocHGlobal(2 * IntPtr.Size);
 var first = Marshal.AllocHGlobal(IntPtr.Size);
@@ -55,6 +56,11 @@ try
     Expect();
 
     api.HasFeature = true;
+    api.State = IVipCoreApi.FeatureState.NoAccess;
+    Command(player);
+    Select();
+    Expect();
+    api.State = IVipCoreApi.FeatureState.Enabled;
     api.Limit = 0;
     player.Team = CsTeam.Spectator;
     player.PawnIsAlive = true;
@@ -76,6 +82,15 @@ try
     Check(GameData.Reads == 0 && player.PawnAssignments == 0, "Rejected requests never bind or respawn");
 
     player.PlayerPawn.Value = new Pawn();
+    GameData.Offset = -1;
+    try
+    {
+        Command(player);
+        throw new Exception("Negative respawn offset accepted");
+    }
+    catch (ArgumentOutOfRangeException ex) when (ex.ParamName == "offset") { }
+    Check(VirtualFunction.Binds == 0 && calls.Count == 0, "Invalid offset never reaches the binding");
+    GameData.Offset = 1;
     Command(player);
     Select();
     Command(other);
@@ -93,7 +108,7 @@ try
     Marshal.WriteIntPtr(table, IntPtr.Size, 200);
     Command(player);
     Expect("respawn.Success");
-    Check(calls[^1] == (200, first) && VirtualFunction.Binds == 2 && GameData.Reads == 1,
+    Check(calls[^1] == (200, first) && VirtualFunction.Binds == 2 && GameData.Reads == 2,
         "Reconnect starts fresh and a replaced vtable entry is rebound");
 
     plugin.RoundStart!();
@@ -118,12 +133,22 @@ try
     Check(calls.Count == before + 1, "Retry succeeds and a synchronous reentrant request is ignored");
 
     plugin.RoundStart();
-    VirtualFunction.Called = (_, _) => plugin.RoundStart();
+    before = calls.Count;
+    VirtualFunction.Called = (target, receiver) =>
+    {
+        Record(target, receiver);
+        plugin.RoundStart();
+        VirtualFunction.Called = Record;
+        Select();
+        Command(other);
+    };
     Command(player);
-    VirtualFunction.Called = Record;
+    Check(calls.Skip(before).SequenceEqual([(200, first), (200, second)]),
+        "Round reset inside respawn keeps the caller guarded while another player can respawn");
+    Command(other);
     Command(player);
     Select();
-    Expect("respawn.Success", "respawn.Success", "respawn.Limit");
+    Expect("respawn.Success", "respawn.Success", "respawn.Limit", "respawn.Success", "respawn.Limit");
 }
 finally
 {
@@ -144,5 +169,14 @@ cancelled.Load(false);
 cancelled.Unload(false);
 Server.Pending!();
 Check(api.Registered == null, "Unload before queued initialization");
+PluginCapability<IVipCoreApi>.Provider = null;
+var waiting = new VipRespawn();
+waiting.Load(false);
+Server.Pending!();
+waiting.Unload(false);
+PluginCapability<IVipCoreApi>.Provider = api;
+waiting.Retry!.Fire();
+Check(waiting.Retry.Killed && waiting.Timers.Count == 0 && api.Registered == null,
+    "Unload while waiting retires the retry and prevents registration");
 
 Console.WriteLine("VIP_Respawn runtime checks passed.");

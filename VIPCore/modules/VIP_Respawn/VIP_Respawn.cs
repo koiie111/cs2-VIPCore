@@ -44,8 +44,7 @@ public class VipRespawn : BasePlugin
             return;
         }
 
-        _retry?.Kill();
-        _retry = null;
+        StopRetry();
         _respawn = new Respawn(this, api);
         api.RegisterFeature(_respawn, FeatureType.Selectable);
     }
@@ -53,9 +52,18 @@ public class VipRespawn : BasePlugin
     public override void Unload(bool hotReload)
     {
         _unloaded = true;
-        _retry?.Kill();
+        StopRetry();
         if (_respawn != null)
             _respawn.Api.UnRegisterFeature(_respawn);
+    }
+
+    private void StopRetry()
+    {
+        if (_retry == null) return;
+        // BasePlugin.Dispose kills every timer still in this list by native address.
+        Timers.Remove(_retry);
+        _retry.Kill();
+        _retry = null;
     }
 }
 
@@ -63,15 +71,16 @@ public class Respawn : VipFeatureBase
 {
     public override string Feature => "Respawn";
 
-    // Only players who actually request a respawn need state. The serial in the
-    // controller handle distinguishes successive connections in the same slot.
-    private sealed class RoundUsage
+    private sealed class SlotUsage(uint controller)
     {
+        public readonly uint Controller = controller;
+        public long Round;
         public int Used;
         public bool InProgress;
     }
 
-    private readonly Dictionary<uint, RoundUsage> _usage = new();
+    private readonly Dictionary<uint, SlotUsage> _usageByIndex = new();
+    private long _round;
     private int? _respawnOffset;
     private nint _lastTarget;
     private Action<nint>? _invokeRespawn;
@@ -85,7 +94,7 @@ public class Respawn : VipFeatureBase
 
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
-            _usage.Clear();
+            _round++;
             return HookResult.Continue;
         });
         plugin.AddCommand("css_respawn", "", (player, _) => PlayerRespawn(player));
@@ -95,12 +104,17 @@ public class Respawn : VipFeatureBase
 
     private void PlayerRespawn(CCSPlayerController? player)
     {
-        if (player is not { IsValid: true } || !IsClientVip(player) || !PlayerHasFeature(player)) return;
+        if (player is not { IsValid: true } || !IsClientVip(player) || !PlayerHasFeature(player) ||
+            GetPlayerFeatureState(player) == FeatureState.NoAccess) return;
 
         var key = player.EntityHandle.Raw;
-        _usage.TryGetValue(key, out var usage);
+        var index = player.Index;
+        _usageByIndex.TryGetValue(index, out var usage);
+        if (usage?.Controller != key) usage = null;
         if (usage?.InProgress == true) return;
-        if ((usage?.Used ?? 0) >= GetFeatureValue<int>(player))
+        var round = _round;
+        var used = usage?.Round == round ? usage.Used : 0;
+        if (used >= GetFeatureValue<int>(player))
         {
             PrintToChat(player, GetTranslatedText("respawn.Limit"));
             return;
@@ -119,11 +133,11 @@ public class Respawn : VipFeatureBase
 
         if (usage == null)
         {
-            usage = new RoundUsage();
-            _usage.Add(key, usage);
+            usage = new SlotUsage(key);
+            _usageByIndex[index] = usage;
         }
-        // SetPawn and Respawn dispatch other plugins synchronously. A nested request
-        // must not spend the same use. A round reset detaches this usage record.
+        // Synchronous events may start a round or replace this controller. Keep the
+        // guard until return and charge only the original connection and round.
         usage.InProgress = true;
         try
         {
@@ -131,7 +145,8 @@ public class Respawn : VipFeatureBase
             var handle = player.Handle;
             if (handle == 0) return;
             InvokeRespawn(handle);
-            usage.Used++;
+            usage.Round = round;
+            usage.Used = used + 1;
         }
         finally
         {
@@ -142,7 +157,8 @@ public class Respawn : VipFeatureBase
 
     private void InvokeRespawn(nint controller)
     {
-        var offset = _respawnOffset ??= GameData.GetOffset("CCSPlayerController_Respawn");
+        var offset = _respawnOffset ?? GameData.GetOffset("CCSPlayerController_Respawn");
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
         // CreateVoid binds the current vtable entry, not the controller. Rebind if
         // another controller implementation or a native hook changes the target.
         var vtable = Marshal.ReadIntPtr(controller);
@@ -152,6 +168,7 @@ public class Respawn : VipFeatureBase
         {
             if (target == 0) throw new InvalidOperationException("Player controller has no respawn function.");
             _invokeRespawn = VirtualFunction.CreateVoid<nint>(controller, offset);
+            _respawnOffset = offset;
             _lastTarget = target;
         }
         _invokeRespawn(controller);

@@ -18,6 +18,7 @@ namespace CounterStrikeSharp.API.Core
         public bool IsValid = true;
         public nint Handle;
         public (uint Raw, int Slot) EntityHandle;
+        public uint Index => (uint)(EntityHandle.Slot + 1);
         public CsTeam Team = CsTeam.Terrorist;
         public bool PawnIsAlive;
         public PawnHandle PlayerPawn = new();
@@ -35,11 +36,12 @@ namespace CounterStrikeSharp.API.Core
     public static class GameData
     {
         public static int Reads;
+        public static int Offset = 1;
         public static int GetOffset(string key)
         {
             if (key != "CCSPlayerController_Respawn") throw new ArgumentException(key);
             Reads++;
-            return 1;
+            return Offset;
         }
     }
     public abstract class BasePlugin
@@ -52,6 +54,7 @@ namespace CounterStrikeSharp.API.Core
         public Action? RoundStart;
         public Action<CCSPlayerController?, object>? Command;
         public Modules.Timers.Timer? Retry;
+        public readonly List<Modules.Timers.Timer> Timers = [];
         public void RegisterEventHandler<T>(Func<T, object, HookResult> handler) where T : new() =>
             RoundStart = () => handler(new T(), new object());
         public void AddCommand(string name, string help, Action<CCSPlayerController?, object> callback)
@@ -59,8 +62,12 @@ namespace CounterStrikeSharp.API.Core
             if (name != "css_respawn" || Command != null) throw new InvalidOperationException(name);
             Command = callback;
         }
-        public Modules.Timers.Timer AddTimer(float interval, Action callback, Modules.Timers.TimerFlags flags) =>
+        public Modules.Timers.Timer AddTimer(float interval, Action callback, Modules.Timers.TimerFlags flags)
+        {
             Retry = new(callback);
+            Timers.Add(Retry);
+            return Retry;
+        }
     }
 }
 
@@ -110,7 +117,7 @@ namespace VipCoreApi
     public interface IVipCoreApi
     {
         enum FeatureType { Selectable }
-        enum FeatureState { Enabled }
+        enum FeatureState { Enabled, Disabled, NoAccess }
         event Action<CCSPlayerController>? OnPlayerSpawn;
         event Action<CCSPlayerController, string>? PlayerLoaded, PlayerRemoved;
         void RegisterFeature(VipFeatureBase feature, FeatureType type);
@@ -133,6 +140,7 @@ namespace VipCoreApi
         public virtual void OnSelectItem(CCSPlayerController player, IVipCoreApi.FeatureState state) { }
         public bool IsClientVip(CCSPlayerController player) => ((TestApi)Api).Vip;
         public bool PlayerHasFeature(CCSPlayerController player) => ((TestApi)Api).HasFeature;
+        public IVipCoreApi.FeatureState GetPlayerFeatureState(CCSPlayerController player) => ((TestApi)Api).State;
         public T GetFeatureValue<T>(CCSPlayerController player) => (T)(object)((TestApi)Api).Limit;
         public string GetTranslatedText(string key) => key;
         public void PrintToChat(CCSPlayerController player, string text) => ((TestApi)Api).Messages.Add(text);
@@ -141,6 +149,7 @@ namespace VipCoreApi
     sealed class TestApi : IVipCoreApi
     {
         public bool Vip = true, HasFeature = true;
+        public IVipCoreApi.FeatureState State = IVipCoreApi.FeatureState.Enabled;
         public int Limit = 1;
         public List<string> Messages = [];
         public VipFeatureBase? Registered;
