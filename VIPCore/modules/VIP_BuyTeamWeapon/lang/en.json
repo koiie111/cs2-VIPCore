@@ -1,7 +1,7 @@
 {
-  "buyteamweapon.round_start": "Enemy weapons: {0}",
-  "buyteamweapon.in_buy_zone": "You must be in the buy zone.",
-  "buyteamweapon.no_money": "You do not have enough money.",
-  "buyteamweapon.wait_for_spawn": "Wait for spawn bonuses and try again.",
-  "buyteamweapon.give_failed": "The weapon could not be given. You were not charged."
+  "buyteamweapon.round_start": "Оружие противника: {0}",
+  "buyteamweapon.in_buy_zone": "Вы должны находиться в зоне покупки.",
+  "buyteamweapon.no_money": "Недостаточно денег для покупки.",
+  "buyteamweapon.wait_for_spawn": "Дождитесь стартовых VIP-бонусов и повторите покупку.",
+  "buyteamweapon.give_failed": "Оружие не выдано. Деньги не списаны."
 }

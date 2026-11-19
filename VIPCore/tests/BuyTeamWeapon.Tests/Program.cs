@@ -90,7 +90,7 @@ foreach (var (command, entity, _, price) in catalog)
 
     player.RejectWeapon = true;
     NoPurchase(price, 2, "engine rejected weapon");
-    Check(player.Chat.Last() == "The weapon could not be given. You were not charged.", "failure message");
+    Check(player.Chat.Last() == "Оружие не выдано. Деньги не списаны.", "failure message");
     player.RejectWeapon = false;
     pawn.InBuyZone = false;
     NoPurchase(10000, 2, "outside buy zone");
@@ -132,7 +132,7 @@ Utilities.Players = [terrorist, counterTerrorist, ..excluded];
 
 foreach (var (locale, heading) in new[]
 {
-    ("en", "Enemy weapons: "),
+    ("en", "Оружие противника: "),
     ("ru", "Оружие противника: "),
     ("de", "Waffen des Gegners: "),
     ("pt-BR", "Armas do time adversário: "),
