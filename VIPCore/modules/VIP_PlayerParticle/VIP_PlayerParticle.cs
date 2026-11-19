@@ -15,17 +15,19 @@ public class VipPlayerParticle : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Particle";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.2";
     public override string ModuleDescription => "Attaches a selectable particle effect to VIP players";
 
     private PlayerParticle? _feature;
     private IVipCoreApi? _api;
+    private bool _resourcesReady;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     public override void Load(bool hotReload)
     {
         // Particle files must be precached on map load, so this listener lives on the plugin itself.
         RegisterListener<Listeners.OnServerPrecacheResources>(PrecacheParticles);
+        RegisterListener<Listeners.OnMapEnd>(() => _resourcesReady = false);
         Server.NextWorldUpdate(Initialize);
     }
 
@@ -44,7 +46,7 @@ public class VipPlayerParticle : BasePlugin
     private void RegisterFeature()
     {
         if (_api == null || _feature != null) return;
-        _feature = new PlayerParticle(this, _api);
+        _feature = new PlayerParticle(this, _api, () => _resourcesReady);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
     }
 
@@ -65,6 +67,7 @@ public class VipPlayerParticle : BasePlugin
     /// </summary>
     private void PrecacheParticles(ResourceManifest manifest)
     {
+        _resourcesReady = false;
         var dir = _api?.CoreConfigDirectory ?? Path.Combine(Application.RootDirectory, "configs/plugins/VIPCore/");
         var path = Path.Combine(dir, "vip.json");
         if (!File.Exists(path)) return;
@@ -92,6 +95,7 @@ public class VipPlayerParticle : BasePlugin
 
             foreach (var file in files)
                 manifest.AddResource(file);
+            _resourcesReady = true;
         }
         catch (Exception e)
         {
@@ -134,7 +138,7 @@ public class PlayerParticle : VipFeatureBase
     /// <summary>Per-player settings, stored as one JSON cookie. A null value means "use the config default".</summary>
     private class Prefs
     {
-        /// <summary>null = never chosen (first entry of the group), "off" = disabled, otherwise an entry name.</summary>
+        /// <summary>null = never chosen (disabled), "off" = disabled, otherwise an explicitly selected entry name.</summary>
         [JsonPropertyName("p")] public string? Particle { get; set; }
         [JsonPropertyName("h")] public float? Height { get; set; }
         [JsonPropertyName("m")] public MineMode Mine { get; set; } = MineMode.All;
@@ -148,9 +152,11 @@ public class PlayerParticle : VipFeatureBase
     private readonly CParticleSystem?[] _active = new CParticleSystem?[MaxPlayers];
     private readonly int[] _team = new int[MaxPlayers];
     private bool _stopped;
+    private readonly Func<bool> _resourcesReady;
 
-    public PlayerParticle(BasePlugin plugin, IVipCoreApi api) : base(api)
+    public PlayerParticle(BasePlugin plugin, IVipCoreApi api, Func<bool> resourcesReady) : base(api)
     {
+        _resourcesReady = resourcesReady;
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
             var player = ev.Userid;
@@ -188,9 +194,10 @@ public class PlayerParticle : VipFeatureBase
         });
 
         // Module loaded on a live server: pick up VIPs already in game.
-        foreach (var player in Utilities.GetPlayers())
-            if (!player.IsBot && IsClientVip(player))
-                Apply(player);
+        if (_resourcesReady())
+            foreach (var player in Utilities.GetPlayers())
+                if (!player.IsBot && IsClientVip(player))
+                    Apply(player);
     }
 
     /// <summary>Called on plugin unload; CounterStrikeSharp drops handlers and listeners itself.</summary>
@@ -361,12 +368,12 @@ public class PlayerParticle : VipFeatureBase
 
     /// <summary>
     /// The entry the player picked if the group still offers it, otherwise the first entry of the group
-    /// (so a fresh VIP gets an effect without opening the menu). Null when disabled.
+    /// after an explicit selection. No saved selection means disabled.
     /// </summary>
     private PlayerParticleEntry? Current(CCSPlayerController player, List<PlayerParticleEntry> entries)
     {
         var saved = Load(player).Particle;
-        if (saved == Off) return null;
+        if (string.IsNullOrEmpty(saved) || saved == Off) return null;
         return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
     }
 
@@ -395,6 +402,10 @@ public class PlayerParticle : VipFeatureBase
         if (_stopped || player is not { IsValid: true } || player.IsBot || player.Slot >= MaxPlayers) return;
 
         Remove(player.Slot);
+
+        // A live load missed this map's precache callback. Wait for the next map
+        // instead of creating entities with resources clients have not received.
+        if (!_resourcesReady()) return;
 
         var pawn = player.PlayerPawn.Value;
         if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE) return;
