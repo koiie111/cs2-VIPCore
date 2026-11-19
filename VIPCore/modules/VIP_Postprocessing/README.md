@@ -62,7 +62,7 @@
 
 | Поле | Описание |
 |------|----------|
-| `name` | название в меню (обязательно, служит и идентификатором выбора — не меняйте его у уже выданных эффектов, иначе сохранённый выбор игроков сбросится на первый доступный эффект) |
+| `name` | название в меню (обязательно, служит и идентификатором выбора — не меняйте его у уже выданных эффектов, иначе сохранённый выбор перестанет применяться) |
 | `file` | путь к ресурсу постобработки `.vpost` (обязательно) |
 | `fade` | время плавного перехода в секундах, по умолчанию `0.25` (как в оригинале) |
 | `required` | необязательно: право или группа CounterStrikeSharp (`@css/vip`, `#css/admin`), нужное для этого эффекта |
@@ -84,7 +84,7 @@
 | Зрители видят: Да/Нет | видят ли ваш эффект те, кто наблюдает за вами после смерти |
 | Сбросить настройки | возвращает `fade` из конфига и все параметры по умолчанию |
 
-Без сохранённого выбора VIP получает первый доступный эффект. Все настройки хранятся одной записью в cookie ядра и сохраняются между сессиями; пункты настройки эффекта скрыты, пока он выключен.
+Без явно сохранённого и доступного выбора постобработка выключена. Все настройки хранятся одной записью в cookie ядра и сохраняются между сессиями; пункты настройки эффекта скрыты, пока он выключен.
 
 ## Отличия от оригинала
 
@@ -100,8 +100,14 @@
 
 Effects are disabled until explicitly selected. Missing or unavailable saved choices do not select the first effect. Cookies remain unchanged. The cold-start map lifecycle fix is retained.
 
-Plugin volumes are tracked before spawning and become master volumes only after successful setup. A failed setup removes the volume. Startup, round start, unload, and a periodic sweep remove orphaned `vipcore_postprocessing` volumes; map-authored volumes are retained. Observer target validation fails closed per recipient, so an invalid target cannot skip filtering for other clients.
+Plugin volumes are tracked before spawning and become master volumes only after successful setup. A failed setup removes the volume. Startup, round start, unload, and a periodic sweep in 1.0.3 remove orphaned `vipcore_postprocessing` volumes; map-authored volumes are retained. Observer target validation fails closed per recipient, so an invalid target cannot skip filtering for other clients.
 
 `css_postprocessing_status` is server-console-only and reports active/owned/orphan counts and filter errors. The release has a distinct assembly name for safe managed loader replacement, with `VIP_Postprocessing.dll` as the canonical entry point. Unload existing instances before replacing files, check automatic loading before issuing a manual load, and verify exactly one loaded 1.0.3 module. Do not load the release DLL as a second plugin.
 
 Validation: `dotnet build modules/VIP_Postprocessing -c Release` and `dotnet run --project tests/VIP_Postprocessing.PolicyTests -c Release`. Human in-game acceptance is still needed for the appearance of explicitly selected filters.
+
+## 1.0.4
+
+The transmit listener runs only while personal volumes exist, including volumes pending deletion. Map volumes are discovered at lifecycle boundaries and tracked through entity events. Removal retries use the specific entity handles. The server-console status includes `filter=on/off`.
+
+Run the policy tests with `dotnet run --project tests/VIP_Postprocessing.PolicyTests -c Release`. Add `-- --benchmark` for a managed simulation of the snapshot filter.
