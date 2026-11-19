@@ -1,0 +1,7 @@
+{
+  "buyteamweapon.round_start": "Armele echipei adverse: {0}",
+  "buyteamweapon.in_buy_zone": "Trebuie să te afli în zona de cumpărare.",
+  "buyteamweapon.no_money": "Nu ai suficienți bani.",
+  "buyteamweapon.wait_for_spawn": "Așteaptă bonusurile de la reapariție și încearcă din nou.",
+  "buyteamweapon.give_failed": "Arma nu a putut fi livrată. Nu ți s-au retras bani."
+}

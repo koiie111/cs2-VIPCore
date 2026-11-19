@@ -1,0 +1,7 @@
+{
+  "buyteamweapon.round_start": "Armas do time adversário: {0}",
+  "buyteamweapon.in_buy_zone": "Você precisa estar na zona de compra.",
+  "buyteamweapon.no_money": "Você não tem dinheiro suficiente.",
+  "buyteamweapon.wait_for_spawn": "Aguarde os bônus de início e tente novamente.",
+  "buyteamweapon.give_failed": "Não foi possível entregar a arma. Nenhum valor foi cobrado."
+}

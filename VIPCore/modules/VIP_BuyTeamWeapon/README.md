@@ -1,11 +1,9 @@
-# BuyTeamWeapon 1.0.3
+# BuyTeamWeapon 1.0.5
 
-Purchases wait for the deferred VIPCore spawn-feature callback to finish. VIP_Money can otherwise reset the account after an early purchase. The next-frame barrier works with Money registered before or after this feature. Each player spawn clears readiness; disconnect and module unload clear local state. Account replication targets CCSPlayerController_InGameMoneyServices.m_iAccount.
+Enable the module for a VIP group with `"BuyTeamWeapon": true` in `vip.json`. Eligible players on either team can buy all 18 team-exclusive firearms in a buy zone at standard CS2 prices. For example, `!mp9` costs $1250, and `!m4a1` buys an M4A1-S for $2900.
 
-Commands, prices and configured VIP access are unchanged.
+At round start, the chat lists the opposing team's commands. Keep the module's bundled `lang` directory alongside its DLL. CounterStrikeSharp loads those files using the server locale.
 
-Validation: `dotnet run --project VIPCore/tests/BuyTeamWeapon.Tests -c Release` compiles the production source with lightweight API doubles and exercises both spawn-feature orders. It does not replace a real client acceptance check.
+Purchases wait for VIPCore's spawn bonuses, including VIP_Money. The plugin deducts and replicates the price after the game hands out the weapon.
 
-For the 2026-10-26 no-restart rollout, build with `-p:AssemblyName=VIP_BuyTeamWeaponPaid` and deploy the three matching files to `plugins/VIP_BuyTeamWeaponPaid/`. Unload the old module, back up and move its folder outside plugins, load the replacement and reload VIP configuration. Never retain both installations. The normal source build retains its established assembly name for existing packaging.
-
-Some running CSS processes reject hot loading due to global MySqlConnector reflection-scanning errors. A new assembly identity only solves the separate retained-assembly-name error. If activation fails, keep the vulnerable module unloaded and report the affected instance; do not restart a server without authorization.
+Run `dotnet run --project VIPCore/tests/BuyTeamWeapon.Tests -c Release` to check the commands, purchase conditions and localized hints. In CS2, join T with the feature enabled and confirm that the round hint contains `!mp9`. In the buy zone, buy it with $1250 and confirm that you receive an MP9 and the HUD shows $0. Repeat on CT and confirm that the round hint lists T weapons.
