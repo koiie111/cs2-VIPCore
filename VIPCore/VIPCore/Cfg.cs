@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace VIPCore;
@@ -20,6 +21,18 @@ public class Config
 public class VipGroup
 {
     public Dictionary<string, object> Values { get; init; } = new();
+
+    public bool HasFeature(string key)
+    {
+        if (!Values.TryGetValue(key, out var value)) return false;
+        // vip.json values arrive as JsonElement. Numbers and objects need no string conversion.
+        return value switch
+        {
+            JsonElement { ValueKind: JsonValueKind.String } json => !json.ValueEquals(""),
+            JsonElement json => json.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined),
+            _ => !string.IsNullOrEmpty(value?.ToString())
+        };
+    }
 }
 
 public class CoreConfig

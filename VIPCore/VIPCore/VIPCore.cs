@@ -102,20 +102,17 @@ public class VipCore : BasePlugin
     private HookResult EventPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
         var player = @event.Userid;
-        if (player == null || !IsClientVip[player.Slot])
-            return HookResult.Continue;
+        if (player == null) return HookResult.Continue;
 
         IsClientVip[player.Slot] = false;
-        if (Users.TryGetValue(player.SteamID, out var user))
-        {
-            foreach (var (key, state) in user.FeatureState)
-            {
-                if (Features.TryGetValue(key, out var feature) && feature.FeatureType is FeatureType.Toggle)
-                    VipApi.SetPlayerCookie(player.SteamID, key, (int)state);
-            }
-        }
+        if (!Users.TryRemove(player.SteamID, out var user)) return HookResult.Continue;
 
-        Users.Remove(player.SteamID, out var _);
+        foreach (var (key, state) in user.FeatureState)
+        {
+            if (state != FeatureState.NoAccess && Features.TryGetValue(key, out var feature) &&
+                feature.FeatureType == FeatureType.Toggle)
+                VipApi.SetPlayerCookie(player.SteamID, key, (int)state);
+        }
 
         var authAccId = player.AuthorizedSteamID;
         if (authAccId == null) return HookResult.Continue;
@@ -154,6 +151,11 @@ public class VipCore : BasePlugin
 
     private void SetupTimers()
     {
+        IsCoreEnableConVar.ValueChanged += (_, enabled) =>
+        {
+            if (enabled)
+                foreach (var player in Utilities.GetPlayers()) RefreshVipStatus(player);
+        };
         AddTimer(300.0f, () =>
         {
             foreach (var player in Utilities.GetPlayers()
@@ -164,9 +166,18 @@ public class VipCore : BasePlugin
 
                 Task.Run(() => Database.RemoveExpiredUsers(player, authId));
 
-                IsClientVip[player.Slot] = IsUserActiveVip(player);
+                RefreshVipStatus(player);
             }
         }, TimerFlags.REPEAT);
+    }
+
+    private void RefreshVipStatus(CCSPlayerController player)
+    {
+        var wasVip = IsClientVip[player.Slot];
+        IsClientVip[player.Slot] = IsUserActiveVip(player);
+        // Authorization while css_vip_enable was off left modules without a PlayerLoaded event.
+        if (!wasVip && IsClientVip[player.Slot] && Users.TryGetValue(player.SteamID, out var user))
+            VipApi.OnPlayerLoaded(player, user.group);
     }
 
     public async Task OnClientAuthorizedAsync(CCSPlayerController player, SteamID steamId)
@@ -227,7 +238,7 @@ public class VipCore : BasePlugin
 
     internal FeatureState InitialFeatureState(ulong steamId, VipGroup? group, string key)
     {
-        if (group == null || !group.Values.TryGetValue(key, out var value) || string.IsNullOrEmpty(value?.ToString()))
+        if (group == null || !group.HasFeature(key))
             return FeatureState.NoAccess;
         var cookie = VipApi.GetPlayerCookie<int>(steamId, key);
         return cookie == 2 ? FeatureState.Enabled : (FeatureState)cookie;
@@ -402,11 +413,36 @@ public class VipCore : BasePlugin
     [ConsoleCommand("css_vip_reload")]
     public void OnCommandReloadConfig(CCSPlayerController? controller, CommandInfo command)
     {
+        var previous = Config;
         LoadConfig();
+        foreach (var player in Utilities.GetPlayers())
+        {
+            if (!Users.TryGetValue(player.SteamID, out var user)) continue;
+            RefreshGroupAccess(player.SteamID, user, previous, (key, state) =>
+                VipApi.SetPlayerFeatureState(player, key, state));
+        }
 
         const string msg = "configuration successfully rebooted!";
 
         ReplyToCommand(controller, msg);
+    }
+
+    internal void RefreshGroupAccess(ulong steamId, User user, Config previous, Action<string, FeatureState> setState)
+    {
+        var oldGroup = previous.Groups.GetValueOrDefault(user.group);
+        var newGroup = Config.Groups.GetValueOrDefault(user.group);
+        foreach (var (key, feature) in Features)
+        {
+            var hadAccess = oldGroup?.HasFeature(key) == true;
+            var hasAccess = newGroup?.HasFeature(key) == true;
+            if (hadAccess == hasAccess) continue;
+
+            user.FeatureState.TryAdd(key, FeatureState.NoAccess);
+            var state = user.FeatureState[key];
+            if (!hasAccess && state != FeatureState.NoAccess && feature.FeatureType == FeatureType.Toggle)
+                VipApi.SetPlayerCookie(steamId, key, (int)state);
+            setState(key, InitialFeatureState(steamId, newGroup, key));
+        }
     }
 
     [RequiresPermissions("@css/root")]
@@ -434,7 +470,7 @@ public class VipCore : BasePlugin
     {
         if (player == null) return;
 
-        if (!IsClientVip[player.Slot])
+        if (!VipApi.IsClientVip(player))
         {
             PrintToChat(player, Localizer["vip.NoAccess"]);
             return;
@@ -451,8 +487,7 @@ public class VipCore : BasePlugin
 
             foreach (var (key, feature) in sortedFeatures)
             {
-                if (!vipGroup.Values.TryGetValue(key, out var featureValue)) continue;
-                if (string.IsNullOrEmpty(featureValue.ToString())) continue;
+                if (!vipGroup.HasFeature(key)) continue;
                 if (!user.FeatureState.TryGetValue(key, out var featureState)) continue;
 
                 var value = string.Empty;
@@ -475,6 +510,16 @@ public class VipCore : BasePlugin
                         : $" [{value}]"),
                     (controller, _) =>
                     {
+                        // An open menu can outlive its module, VIP record or displayed toggle state.
+                        if (!VipApi.IsClientVip(controller) || !VipApi.PlayerHasFeature(controller, key) ||
+                            !Features.TryGetValue(key, out var currentFeature) || currentFeature != feature ||
+                            !Users.TryGetValue(controller.SteamID, out var currentUser) || currentUser != user ||
+                            !user.FeatureState.TryGetValue(key, out var currentState) || currentState != featureState)
+                        {
+                            CreateMenu(controller);
+                            return;
+                        }
+
                         var result = VipApi.PlayerUseFeature(player, key, featureState, featureType);
 
                         if (result == HookResult.Handled || result == HookResult.Stop)

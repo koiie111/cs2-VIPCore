@@ -13,6 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="VIP_PlayerTrail.RuntimeTests" />
     <ProjectReference Include="..\VipCoreApi\VipCoreApi.csproj" />
   </ItemGroup>
 

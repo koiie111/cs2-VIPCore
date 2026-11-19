@@ -287,19 +287,18 @@ public class Database(VipCore vipCore, ILogger logger, string dbConnectionString
 
             foreach (var user in expiredUsers)
             {
-                await connection.ExecuteAsync("DELETE FROM vip_users WHERE account_id = @AccId AND sid = @sid",
-                    new
-                    {
-                        AccId = user.account_id,
-                        user.sid
-                    });
+                // A renewal may have replaced the expiry since the SELECT.
+                var deleted = await connection.ExecuteAsync(
+                    "DELETE FROM vip_users WHERE account_id = @AccId AND sid = @sid AND expires = @expires",
+                    new { AccId = user.account_id, user.sid, user.expires });
+                if (deleted == 0) continue;
 
                 await Server.NextFrameAsync(() =>
                 {
-                    var authSteamId = player.AuthorizedSteamID;
-                    if (authSteamId != null && authSteamId.AccountId == user.account_id)
-                        vipCore.PrintToChat(player, vipCore.Localizer["vip.Expired", user.group]);
-
+                    if (!player.IsValid || player.AuthorizedSteamID?.AccountId != user.account_id) return;
+                    if (vipCore.Users.TryGetValue(steamId.SteamId64, out var current) &&
+                        (current.expires == 0 || current.expires > DateTimeOffset.UtcNow.ToUnixTimeSeconds())) return;
+                    vipCore.PrintToChat(player, vipCore.Localizer["vip.Expired", user.group]);
                     vipCore.VipApi.OnPlayerRemoved(player, user.group);
                 });
 
