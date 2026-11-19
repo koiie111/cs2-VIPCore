@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../modules/VIP_Postprocessing/VIP_Postprocessing.cs" Link="VIP_Postprocessing.cs" />
     <Compile Include="../../modules/VIP_Postprocessing/PostprocessingPolicy.cs" Link="PostprocessingPolicy.cs" />
     <Compile Include="../../modules/VIP_Postprocessing/VolumeVisibility.cs" Link="VolumeVisibility.cs" />
   </ItemGroup>

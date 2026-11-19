@@ -17,7 +17,7 @@ public class VipPostprocessing : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Postprocessing";
-    public const string Version = "1.0.4";
+    public const string Version = "1.0.5";
     public override string ModuleVersion => Version;
     public override string ModuleDescription => "Selectable screen post-processing (color grading) for VIP players";
 
@@ -27,12 +27,12 @@ public class VipPostprocessing : BasePlugin
 
     private bool _mapRunning;
     private bool _unloaded;
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _initializationRetry;
 
     public override void Load(bool hotReload)
     {
-        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
-        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
-        _mapRunning = hotReload || !string.IsNullOrEmpty(Server.MapName);
+        // Even a reload can occur between maps, before the entity system is available.
+        _mapRunning = !string.IsNullOrEmpty(Server.MapName);
         RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
         RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
         // Post-processing resources must be precached on map load, so this listener lives on the plugin itself.
@@ -50,8 +50,21 @@ public class VipPostprocessing : BasePlugin
     private void Initialize()
     {
         if (_unloaded || _api != null) return;
-        _api = PluginCapability.Get();
-        if (_api == null) return;
+        try
+        {
+            _api = PluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            // CSS throws when VIPCore has not registered the capability yet.
+        }
+        if (_api == null)
+        {
+            _initializationRetry ??= AddTimer(2f, Initialize, TimerFlags.REPEAT);
+            return;
+        }
+        _initializationRetry?.Kill();
+        _initializationRetry = null;
         _api.OnCoreReady += RegisterFeature;
         // The core-ready event has already fired when loading this module on a live server.
         RegisterFeature();
@@ -68,6 +81,7 @@ public class VipPostprocessing : BasePlugin
     public override void Unload(bool hotReload)
     {
         _unloaded = true;
+        _initializationRetry?.Kill();
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeature;
         if (_feature == null) return;
@@ -98,13 +112,15 @@ public class VipPostprocessing : BasePlugin
             var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var group in groups.EnumerateObject())
             {
-                if (!group.Value.TryGetProperty("Values", out var values) ||
+                if (group.Value.ValueKind != JsonValueKind.Object ||
+                    !group.Value.TryGetProperty("Values", out var values) || values.ValueKind != JsonValueKind.Object ||
                     !values.TryGetProperty(Postprocessing.FeatureName, out var entries) ||
                     entries.ValueKind != JsonValueKind.Array)
                     continue;
 
                 foreach (var entry in entries.EnumerateArray())
-                    if (entry.TryGetProperty("file", out var file) && file.GetString() is { Length: > 0 } name)
+                    if (entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("file", out var file) &&
+                        file.ValueKind == JsonValueKind.String && file.GetString() is { Length: > 0 } name)
                         files.Add(name);
             }
 
@@ -173,6 +189,7 @@ public class Postprocessing : VipFeatureBase
 
     private readonly Dictionary<int, Prefs> _prefs = new();
     private readonly VolumeVisibility _volumes = new();
+    private readonly PostprocessingEntry?[] _activeEntries = new PostprocessingEntry?[MaxPlayers];
     private readonly long[] _pendingApply = new long[MaxPlayers];
     private readonly BasePlugin _plugin;
     private bool _mapRunning;
@@ -190,8 +207,19 @@ public class Postprocessing : VipFeatureBase
         _mapRunning = mapRunning;
         plugin.AddTimer(2f, () =>
         {
-            if (_mapRunning && !_stopped && _volumes.Retiring.Count != 0)
+            if (!_mapRunning || _stopped) return;
+            if (_volumes.Retiring.Count != 0)
                 RetryRemovals();
+            // Older cores also change global VIP/feature access without a per-player event.
+            var active = _volumes.Active;
+            while (active != 0)
+            {
+                var slot = VolumeVisibility.TakeSlot(ref active);
+                var player = Utilities.GetPlayerFromSlot(slot);
+                if (player is not { IsValid: true } || !CanUseFeature(player) ||
+                    _activeEntries[slot] is not { } entry || !Allowed(player, entry))
+                    ClearPlayer(slot);
+            }
         }, TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnMapEnd>(() =>
         {
@@ -202,6 +230,7 @@ public class Postprocessing : VipFeatureBase
         {
             var player = ev.Userid;
             if (player is not { IsValid: true }) return HookResult.Continue;
+            if ((uint)player.Slot >= MaxPlayers) return HookResult.Continue;
             RemoveVolume(player.Slot);
             QueueApply(player);
             return HookResult.Continue;
@@ -218,9 +247,9 @@ public class Postprocessing : VipFeatureBase
         });
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
-            for (var slot = 0; slot < MaxPlayers; slot++)
-                RemoveVolume(slot);
-            RefreshVolumes();
+            RemoveActiveVolumes();
+            // Spawns may already have run. Restore surviving players as well as later spawns.
+            Start();
             return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.OnEntitySpawned>(OnEntitySpawned);
@@ -254,6 +283,7 @@ public class Postprocessing : VipFeatureBase
     private void ResetMap()
     {
         _mapGeneration++;
+        Array.Clear(_activeEntries);
         Array.Clear(_pendingApply);
         _prefs.Clear();
         _volumes.Clear();
@@ -264,7 +294,13 @@ public class Postprocessing : VipFeatureBase
     {
         if (_stopped || !_mapRunning || !player.IsValid || player.IsBot) return;
         var slot = player.Slot;
-        if ((uint)slot >= MaxPlayers || _pendingApply[slot] != 0) return;
+        if ((uint)slot >= MaxPlayers) return;
+        if (!CanUseFeature(player) || !PostprocessingPolicy.HasExplicitEffect(Load(player).Effect))
+        {
+            ClearPlayer(slot);
+            return;
+        }
+        if (_pendingApply[slot] != 0) return;
 
         var controller = player.EntityHandle.Raw;
         var request = ++_applySequence;
@@ -289,8 +325,7 @@ public class Postprocessing : VipFeatureBase
         if (_mapRunning)
         {
             RefreshVolumes();
-            for (var slot = 0; slot < MaxPlayers; slot++)
-                RemoveVolume(slot);
+            RemoveActiveVolumes();
             RetryRemovals();
         }
 
@@ -506,8 +541,16 @@ public class Postprocessing : VipFeatureBase
 
     private static bool Allowed(CCSPlayerController player, PostprocessingEntry entry)
     {
-        if (!string.IsNullOrEmpty(entry.Required) && !AdminManager.PlayerHasPermissions(player, entry.Required))
-            return false;
+        if (!string.IsNullOrEmpty(entry.Required))
+        {
+            var allowed = entry.Required[0] switch
+            {
+                '#' => AdminManager.PlayerInGroup(player, entry.Required),
+                '@' => AdminManager.PlayerHasPermissions(player, entry.Required),
+                _ => false
+            };
+            if (!allowed) return false;
+        }
 
         if (string.Equals(entry.Team, "T", StringComparison.OrdinalIgnoreCase)) return player.TeamNum == 2;
         if (string.Equals(entry.Team, "CT", StringComparison.OrdinalIgnoreCase)) return player.TeamNum == 3;
@@ -565,16 +608,24 @@ public class Postprocessing : VipFeatureBase
             var entityHandle = volume.EntityHandle;
             handle = entityHandle.Raw;
             _volumes.Add(slot, handle, entityHandle.Index, prefs.Spectators, prefs.ReplaceMap);
+            _activeEntries[slot] = entry;
             UpdateFilterRegistration();
             volume.DispatchSpawn(keys);
-            if (!_volumes.Owns(handle) || ResolveVolume(handle) is not { } spawned)
+            // A spawn callback can retire or replace the owner's volume before DispatchSpawn returns.
+            if (_volumes.Handle(slot) != handle) return;
+            if (ResolveVolume(handle) is not { } spawned)
             {
-                _volumes.Forget(handle);
-                UpdateFilterRegistration();
+                ForgetVolume(handle);
                 return;
             }
 
             spawned.AcceptInput("SetParent", pawn, null, "!activator");
+            if (_volumes.Handle(slot) != handle) return;
+            if (!spawned.IsValid)
+            {
+                ForgetVolume(handle);
+                return;
+            }
             spawned.Master = true;
             Utilities.SetStateChanged(spawned, "CPostProcessingVolume", "m_bMaster");
         }
@@ -600,8 +651,15 @@ public class Postprocessing : VipFeatureBase
         RemoveVolume(slot);
     }
 
+    private void RemoveActiveVolumes()
+    {
+        var active = _volumes.Active;
+        while (active != 0) RemoveVolume(VolumeVisibility.TakeSlot(ref active));
+    }
+
     private void RemoveVolume(int slot)
     {
+        _activeEntries[slot] = null;
         var handle = _volumes.Handle(slot);
         if (handle == 0) return;
 
@@ -622,18 +680,23 @@ public class Postprocessing : VipFeatureBase
             var volume = ResolveVolume(handle);
             if (volume == null)
             {
-                _volumes.Forget(handle);
-                UpdateFilterRegistration();
+                ForgetVolume(handle);
                 return;
             }
 
             // Neutralize a master before requesting engine deletion. A retiring index stays hidden.
-            if (volume.Master)
+            try
             {
-                volume.Master = false;
-                Utilities.SetStateChanged(volume, "CPostProcessingVolume", "m_bMaster");
+                if (volume.Master)
+                {
+                    volume.Master = false;
+                    Utilities.SetStateChanged(volume, "CPostProcessingVolume", "m_bMaster");
+                }
             }
-            volume.Remove();
+            finally
+            {
+                if (volume.IsValid) volume.Remove();
+            }
         }
         catch (Exception error)
         {
@@ -666,7 +729,7 @@ public class Postprocessing : VipFeatureBase
 
     private void TrackSpawnedVolume(CPostProcessingVolume volume)
     {
-        if (!volume.IsValid) return;
+        if (!volume.IsValid || volume.DesignerName != VolumeClass) return;
         var handle = volume.EntityHandle;
         if (_volumes.Owns(handle.Raw)) return;
 
@@ -685,10 +748,14 @@ public class Postprocessing : VipFeatureBase
     private void OnEntityDeleted(CEntityInstance entity)
     {
         if (_volumes.NeedsFilter || _volumes.Map.Count != 0)
-        {
-            _volumes.Forget(entity.EntityHandle.Raw);
-            UpdateFilterRegistration();
-        }
+            ForgetVolume(entity.EntityHandle.Raw);
+    }
+
+    private void ForgetVolume(uint handle)
+    {
+        var slot = _volumes.Forget(handle);
+        if (slot >= 0) _activeEntries[slot] = null;
+        UpdateFilterRegistration();
     }
 
     private void UpdateFilterRegistration()
@@ -706,7 +773,7 @@ public class Postprocessing : VipFeatureBase
     {
         if (!_mapRunning) return $"Postprocessing {VipPostprocessing.Version}: waiting for map";
         var owned = Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass)
-            .Count(volume => volume.IsValid && IsOwned(volume));
+            .Count(volume => volume.IsValid && volume.DesignerName == VolumeClass && IsOwned(volume));
         var active = System.Numerics.BitOperations.PopCount(_volumes.Active);
         return $"Postprocessing {VipPostprocessing.Version}: default=off active={active} owned={owned} orphan={owned - active} purged={_purged} blocked={_blocked} transmitErrors={_transmitErrors} filter={(_filterRegistered ? "on" : "off")}";
     }
@@ -714,13 +781,18 @@ public class Postprocessing : VipFeatureBase
     private int ShownOwner(CCSPlayerController? viewer)
     {
         if (viewer is not { IsValid: true }) return -1;
-        if (viewer.PawnIsAlive) return viewer.Slot;
+        var ownSlot = viewer.Slot;
+        if (_volumes.Spectatable == 0 && (_volumes.Active & VolumeVisibility.OwnerBit(ownSlot)) == 0) return -1;
+        if (viewer.PawnIsAlive) return ownSlot;
         if (_volumes.Spectatable == 0) return -1;
 
-        var target = viewer.Pawn.Value?.ObserverServices?.ObserverTarget.Value;
+        var observer = viewer.Pawn.Value?.ObserverServices;
+        if (observer == null || (ObserverMode_t)observer.ObserverMode is not
+            (ObserverMode_t.OBS_MODE_IN_EYE or ObserverMode_t.OBS_MODE_CHASE)) return -1;
+        var target = observer.ObserverTarget.Value;
         if (target is not { IsValid: true } || target.DesignerName != "player") return -1;
         var observed = target.As<CCSPlayerPawn>().OriginalController.Value;
-        if (observed is not { IsValid: true }) return -1;
+        if (observed is not { IsValid: true } || observed.PlayerPawn.Raw != target.EntityHandle.Raw) return -1;
         var slot = observed.Slot;
         return (_volumes.Spectatable & VolumeVisibility.OwnerBit(slot)) != 0 ? slot : -1;
     }

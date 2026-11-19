@@ -65,5 +65,6 @@ volumes.Clear();
 Check(!volumes.NeedsFilter && volumes.Spectatable == 0 && volumes.Map.Count == 0);
 Check(!volumes.Owns(last) && volumes.Handle(63) == 0 && !volumes.HideMap(63));
 
-Console.WriteLine($"Total: {checks} checks passed.");
+RuntimeChecks.Run();
+Console.WriteLine($"Total: {checks} policy/registry checks and runtime scenarios passed.");
 if (args.Contains("--benchmark")) ManagedBenchmark.Run();

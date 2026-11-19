@@ -1,6 +1,6 @@
 # VIP_Postprocessing
 
-Накладывает на экран VIP-игрока постобработку (цветокоррекцию) через `post_processing_volume`, закреплённый на игроке. Эффект появляется при спавне и пропадает при смерти, смене команды и в конце раунда. Другие игроки его не видят — объём передаётся только владельцу (и зрителям, наблюдающим за ним). Игрок целиком настраивает эффект в меню `!vip` (см. «Меню игрока»).
+Накладывает на экран VIP-игрока постобработку (цветокоррекцию) через `post_processing_volume`, закреплённый на игроке. Эффект появляется при спавне, снимается при смерти или смене команды и восстанавливается у живого игрока в начале раунда. Объём передаётся владельцу и, по его выбору, зрителям, наблюдающим за ним от первого или третьего лица. Игрок настраивает эффект в меню `!vip` (см. «Меню игрока»).
 
 Порт модуля `Postprocessing` из [ByDexterTR/CS2Plugins](https://github.com/ByDexterTR/CS2Plugins/blob/main/VIPCore/modules/Postprocessing.cs) под API этого ядра (`VipFeatureBase`, `vipcore:core`).
 
@@ -91,7 +91,7 @@
 - Фича регистрируется как `Selectable` в `VipFeatureBase`: игрок включает и выключает её в `!vip`, а конфиг лежит в `vip.json` (в оригинале — отдельный модуль на `VipModule` с `GroupValue`).
 - Добавлены персональные настройки: время перехода, автоэкспозиция и её диапазон (в оригинале жёстко `0.5–2`), замена эффектов карты и видимость для зрителей (в оригинале игрок мог только выбрать эффект по имени).
 - Скрытие объёма от других игроков сделано через `Listeners.CheckTransmit` API CounterStrikeSharp, а не через `HookTransmit` оригинального ядра.
-- `required` проверяется через `AdminManager.PlayerHasPermissions` CounterStrikeSharp.
+- Для `required` модуль проверяет флаг `@…` через `AdminManager.PlayerHasPermissions`, а группу `#…` через `AdminManager.PlayerInGroup`.
 - Эффект не создаётся для ботов.
 - Оригинал по умолчанию показывал эффект зрителям всегда; здесь это можно отключить.
 
@@ -111,3 +111,9 @@ Validation: `dotnet build modules/VIP_Postprocessing -c Release` and `dotnet run
 The transmit listener runs only while personal volumes exist, including volumes pending deletion. Map volumes are discovered at lifecycle boundaries and tracked through entity events. Removal retries use the specific entity handles. The server-console status includes `filter=on/off`.
 
 Run the policy tests with `dotnet run --project tests/VIP_Postprocessing.PolicyTests -c Release`. Add `-- --benchmark` for a managed simulation of the snapshot filter.
+
+## 1.0.5
+
+При поздней загрузке VIPCore модуль повторяет регистрацию. На старте раунда он учитывает игроков, которые уже успели заспавниться. Для VIP без выбранного эффекта модуль пропускает отложенное применение. Пока эффект активен, раз в две игровые секунды модуль перепроверяет доступ к фиче и ограничения применённой записи. После возврата доступа сохранённый выбор применяется при следующем спавне, начале раунда или загрузке VIP игрока.
+
+Тесты запускают обработчики модуля с имитацией событий CS2. Бенчмарк измеряет перебор персональных объёмов в управляемом коде. Для оценки нагрузки на игровой поток сравнивайте профили на одной карте при одинаковом онлайне, числе активных эффектов и зрителей. Учитывайте `CheckTransmit`, создание и удаление сущностей, старт раунда и p99 времени кадра. При `active=0` и отсутствии ожидающих удаления объёмов команда `css_postprocessing_status` должна показывать `filter=off`.

@@ -44,19 +44,21 @@ internal sealed class VolumeVisibility
         _owners.Add(handle, -1);
     }
 
-    public void Forget(uint handle)
+    // Returns the slot whose active volume was deleted, if any.
+    public int Forget(uint handle)
     {
         Map.Remove(handle);
-        if (!_owners.Remove(handle, out var slot)) return;
+        if (!_owners.Remove(handle, out var slot)) return -1;
         if (slot < 0)
         {
             Retiring.Remove(handle);
-            return;
+            return -1;
         }
 
         SetPreferences(slot, false, false);
         Active &= ~(1UL << slot);
         _handles[slot] = 0;
+        return slot;
     }
 
     public ulong HiddenOwners(int shown) => Active & ~OwnerBit(shown);
