@@ -1,4 +1,4 @@
-﻿using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Commands;
 using VipCoreApi;
@@ -10,9 +10,9 @@ public class VipResetDeaths : BasePlugin
 {
     public override string ModuleAuthor => "WodiX";
     public override string ModuleName => "[VIP] ResetDeaths";
-    public override string ModuleVersion => "v1.0.0";
+    public override string ModuleVersion => "v1.0.1";
 
-    private ResetDeaths _resetDeaths;
+    private ResetDeaths? _resetDeaths;
     private IVipCoreApi? _api;
     
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
@@ -22,16 +22,26 @@ public class VipResetDeaths : BasePlugin
         _api = PluginCapability.Get();
         if (_api == null) return;
 
-        _api.OnCoreReady += () =>
-        {
-            _resetDeaths = new ResetDeaths(this, _api);
-            _api.RegisterFeature(_resetDeaths);
-        };
+        _api.OnCoreReady += RegisterResetDeaths;
+        // VIPCore may already be ready when this module is loaded on a live server.
+        RegisterResetDeaths();
     }
-    
+
+    private void RegisterResetDeaths()
+    {
+        if (_api == null || _resetDeaths != null) return;
+        _resetDeaths = new ResetDeaths(this, _api);
+        _api.RegisterFeature(_resetDeaths);
+    }
+
     public override void Unload(bool hotReload)
     {
-        _api?.UnRegisterFeature(_resetDeaths);
+        if (_api != null)
+        {
+            _api.OnCoreReady -= RegisterResetDeaths;
+            if (_resetDeaths != null) _api.UnRegisterFeature(_resetDeaths);
+        }
+        _resetDeaths = null;
     }
 }
 
