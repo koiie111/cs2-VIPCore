@@ -13,7 +13,8 @@ if (args.Contains("--benchmark"))
 
 VerifyPolicy();
 VerifyPolicyTransitions();
-VerifyLifecycle();
+VerifyLifecycle(notifications: false);
+VerifyLifecycle(notifications: true);
 Console.WriteLine("PlayerParticle policy and lifecycle checks passed.");
 
 static void VerifyPolicy()
@@ -32,9 +33,12 @@ static void VerifyPolicy()
         var sameTeam = ownerTeam > 1 && ownerTeam == viewerTeam;
         var ownerAllows = mine switch { MineMode.Team => sameTeam, MineMode.Self => false, _ => true };
         var viewerAllows = others switch { OthersMode.Team => sameTeam, OthersMode.None => false, _ => true };
-        Check((policy.Hidden(64) != 0) == !seeOwn, "Own particle visibility");
-        Check((policy.Hidden(1) != 0) == !(ownerAllows && viewerAllows), "Other particle visibility");
+        Check((policy.HiddenIndices(64).Length != 0) == !seeOwn, "Own particle visibility");
+        Check((policy.HiddenIndices(1).Length != 0) == !(ownerAllows && viewerAllows), "Other particle visibility");
         Check(policy.NeedsFilter == (!seeOwn || !(ownerAllows && viewerAllows)), "Filter eligibility");
+        policy.SetParticle(64, 700);
+        Check(!policy.HiddenIndices(1).Contains(300) && !policy.HiddenIndices(64).Contains(300),
+            "Replacing an index invalidates already materialized lists");
         policy.SetParticle(64, 0);
         Check(!policy.NeedsFilter, "Last particle clears all masks");
     }
@@ -80,27 +84,41 @@ static void VerifyPolicyTransitions()
                     if (hidden) expected |= UInt128.One << owner;
                 }
             }
-            Check(policy.Hidden(viewer) == expected, $"Visibility after change {change}, viewer {viewer}");
+            UInt128 observed = 0;
+            foreach (var index in policy.HiddenIndices(viewer))
+            {
+                var owner = index - 100;
+                Check((uint)owner < states.Length && (observed & (UInt128.One << owner)) == 0,
+                    "Snapshot contains only unique current entity indices");
+                observed |= UInt128.One << owner;
+            }
+            Check(observed == expected, $"Visibility after change {change}, viewer {viewer}");
             needsFilter |= expected != 0;
         }
         Check(policy.NeedsFilter == needsFilter, "Subscription follows every visibility transition");
     }
 }
 
-static void VerifyLifecycle()
+static void VerifyLifecycle(bool notifications)
 {
     const string fire = """[{"name":"Fire","particle":"fire.vpcf","offset":15}]""";
     const string aura = """[{"name":"Aura","particle":"aura.vpcf","offset":40}]""";
     var directory = Directory.CreateTempSubdirectory("particle-tests");
     try
     {
-        var api = new FakeApi(directory.FullName);
-        PluginCapability<IVipCoreApi>.Value = api;
+        var api = notifications ? new NotifyingApi(directory.FullName) : new FakeApi(directory.FullName);
+        PluginCapability<IVipCoreApi>.Value = null;
         var plugin = new VipPlayerParticle();
         BasePlugin.Instance = plugin;
+        void Reload()
+        {
+            if (api is NotifyingApi modern) modern.NotifyAvailability();
+            else plugin.Reload!(null, null);
+        }
         var owner = Join(0, 1, 2, 1000);
         var viewer = Join(64, 2, 2, 1010);
         var guest = Join(2, 3, 2, 1020);
+        var bot = Join(3, 0, 3, 1100, bot: true);
         api.Entries["premium"] = fire;
         api.Entries["other"] = aura;
         api.Cookies[owner.SteamID] = """{"p":"Fire","h":25,"m":1,"o":0,"s":true}""";
@@ -110,6 +128,10 @@ static void VerifyLifecycle()
         plugin.Load(hotReload: true);
         plugin.OnAllPluginsLoaded(hotReload: true);
         Server.Advance();
+        Check(plugin.Timers.Single().Active && api.Feature == null, "Missing core schedules one retry");
+        PluginCapability<IVipCoreApi>.Value = api;
+        plugin.Timers.Single().Fire();
+        Check(!plugin.Timers.Single().Active, "Retry releases after the late core registers");
         api.Feature!.OnSelectItem(owner, FeatureState.Enabled);
         Check(api.Menu != null, "Hot-loaded module offers the menu");
         plugin.Fire(new EventPlayerSpawn(owner));
@@ -132,7 +154,40 @@ static void VerifyLifecycle()
         Check(IsHidden(plugin, viewer, particle) && !IsHidden(plugin, owner, particle) &&
               !IsHidden(plugin, guest, particle), "The opted-out viewer still filters other particles");
 
+        if (api is NotifyingApi modern)
+        {
+            api.Available = false;
+            modern.NotifyAvailability();
+            modern.NotifyAvailability();
+            Check(Server.Pending.Count == 1, "Global changes coalesce before the next frame");
+            Server.Advance();
+            Check(!Particles().Any() && !plugin.HasListener<Listeners.CheckTransmit>(), "Global disable clears effects");
+            api.Available = true;
+            modern.NotifyAvailability();
+            Server.Advance();
+            particle = Particle();
+            Check(IsHidden(plugin, viewer, particle), "Global enable restores both owners and viewers");
+        }
+        api.LoadPlayer(viewer, "no_particle");
+        Check(!plugin.HasListener<Listeners.CheckTransmit>(), "Lost group access resets the viewer policy");
+        api.LoadPlayer(viewer, "premium");
+        Check(IsHidden(plugin, viewer, particle), "Restoring access reloads the saved viewer preference");
+        api.SetState(viewer, FeatureState.Disabled);
+        Check(!plugin.HasListener<Listeners.CheckTransmit>(), "Disabling the feature releases the viewer filter");
+        api.SetState(viewer, FeatureState.Enabled);
+        Check(IsHidden(plugin, viewer, particle), "Re-enabling the feature restores the saved viewer policy");
         api.RemovePlayer(viewer);
+        plugin.Fire(new EventPlayerSpawn(bot));
+        plugin.Fire(new EventPlayerTeam(bot, 3));
+        Check(!plugin.HasListener<Listeners.CheckTransmit>(), "Opposing bots cannot keep the callback active");
+
+        plugin.Invoke<Listeners.OnClientPutInServer>(cb => cb(4));
+        var spectator = Join(4, 0, 1, 1200, bot: true, hltv: true);
+        Check(IsHidden(plugin, spectator, particle), "Entering slot is filtered before its controller is ready");
+        plugin.Fire(new EventPlayerConnectFull(spectator));
+        Check(IsHidden(plugin, spectator, particle), "HLTV remains a network recipient");
+        plugin.Invoke<Listeners.OnClientDisconnectPost>(cb => cb(4));
+        Utilities.Players[4] = null;
         Check(!plugin.HasListener<Listeners.CheckTransmit>(), "Unrestricted effect has no callback");
         guest.TeamNum = 3;
         plugin.Fire(new EventPlayerTeam(guest, 3));
@@ -143,7 +198,7 @@ static void VerifyLifecycle()
 
         api.Feature.OnSelectItem(owner, FeatureState.Enabled);
         api.Menu!.Click(owner, "playerparticle.Self");
-        Check(IsHidden(plugin, owner, particle) && Utilities.Created == 1, "Self toggle updates visibility in place");
+        Check(ReferenceEquals(Particle(), particle) && IsHidden(plugin, owner, particle), "Self toggle updates visibility in place");
         particle.Remove();
         Utilities.NextEntity = particle.EntityHandle.Raw + 0x8000;
         var unrelated = Utilities.CreateEntityByName<CParticleSystem>("info_particle_system")!;
@@ -158,6 +213,27 @@ static void VerifyLifecycle()
         plugin.Fire(new EventPlayerSpawn(owner));
         Server.Advance();
         Check(Particle().EffectName == "fire.vpcf", "Same-frame death and respawn apply the new request");
+        var oldParticle = Particle();
+        plugin.Fire(new EventPlayerSpawn(owner));
+        var newPawn = new Pawn { EntityHandle = new(1301) };
+        owner.PlayerPawn = new(newPawn.EntityHandle.Raw);
+        Server.Advance();
+        Check(!oldParticle.IsValid && Particle().Parent == newPawn, "Deferred spawn follows the current live pawn");
+
+        plugin.Fire(new EventPlayerSpawn(owner));
+        Reload();
+        plugin.Fire(new EventRoundEnd());
+        api.LoadPlayer(owner, "premium");
+        api.Feature.OnSelectItem(owner, FeatureState.Enabled);
+        api.Menu!.Click(owner, "playerparticle.Particle");
+        api.Menu!.Click(owner, "Fire");
+        Server.Advance();
+        Check(!Particles().Any(), "Reload, selection and queued spawn respect round end");
+        plugin.Fire(new EventRoundPrestart());
+        plugin.Fire(new EventPlayerSpawn(owner));
+        Server.Advance();
+        plugin.Fire(new EventRoundStart());
+        Check(Particle().Parent == newPawn, "Round start preserves an already spawned player's effect");
         var created = Utilities.Created;
         api.LoadPlayer(owner, "premium");
         Check(Utilities.Created == created, "Repeated apply reuses the same pawn, resource and height");
@@ -172,7 +248,7 @@ static void VerifyLifecycle()
 
         api.LoadPlayer(owner, "premium");
         api.Entries["premium"] = """[{"name":"Renamed","particle":"fire.vpcf","offset":80}]""";
-        plugin.Reload!(null, null);
+        Reload();
         Server.Advance();
         Check(Particle().EffectName == "fire.vpcf", "Missing saved name falls back to the first current entry");
         api.Feature.OnSelectItem(owner, FeatureState.Enabled);
@@ -180,11 +256,15 @@ static void VerifyLifecycle()
         Check(Particle().Origin?.Z == 80 && !plugin.HasListener<Listeners.CheckTransmit>(),
             "Reset restores the reloaded height and the default visibility");
         api.Entries["premium"] = """[{"name":"Renamed","particle":"fire.vpcf","offset":90}]""";
-        plugin.Reload!(null, null);
+        Reload();
         Server.Advance();
         Check(Particle().Origin?.Z == 90, "Reload applies a changed offset for an already precached path");
+        api.Entries["premium"] = """[{"name":"Renamed","particle":"FIRE.vpcf"}]""";
+        Reload();
+        Server.Advance();
+        Check(!Particles().Any(), "A differently cased path must appear in the manifest before use");
         api.Entries["premium"] = aura;
-        plugin.Reload!(null, null);
+        Reload();
         Server.Advance();
         Check(!Particles().Any(), "Reload blocks a path absent from this map's manifest");
 
@@ -208,6 +288,9 @@ static void VerifyLifecycle()
         api.Menu!.Click(replacement, "playerparticle.Particle");
         api.Menu!.Click(replacement, "Aura");
         Check(Particle().EffectName == "aura.vpcf", "First manual selection creates a particle");
+        api.Cookies[replacement.SteamID] = """{"p":"Aura","h":1e100}""";
+        api.LoadPlayer(replacement, "premium");
+        Check(Particle().Origin?.Z == 40, "An overflowing saved height falls back to the configured height");
         plugin.Fire(new EventPlayerSpawn(replacement));
         plugin.Unload(hotReload: true);
         Server.Advance();
@@ -217,15 +300,19 @@ static void VerifyLifecycle()
     finally
     {
         directory.Delete(recursive: true);
+        Array.Clear(Utilities.Players);
+        CEntityInstance.Entities.Clear();
+        Utilities.Created = 0;
+        Utilities.NextEntity = 100;
     }
 }
 
-static CCSPlayerController Join(int slot, ulong steamId, int team, uint handle)
+static CCSPlayerController Join(int slot, ulong steamId, int team, uint handle, bool bot = false, bool hltv = false)
 {
     var pawn = new Pawn { EntityHandle = new(handle + 1) };
     var player = new CCSPlayerController
     {
-        EntityHandle = new(handle), Slot = slot, SteamID = steamId, TeamNum = team,
+        EntityHandle = new(handle), Slot = slot, SteamID = steamId, TeamNum = team, IsBot = bot, IsHLTV = hltv,
         PlayerPawn = new(pawn.EntityHandle.Raw)
     };
     Utilities.Players[slot] = player;

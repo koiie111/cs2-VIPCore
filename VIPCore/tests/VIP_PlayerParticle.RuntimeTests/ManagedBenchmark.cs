@@ -87,10 +87,9 @@ internal static class ManagedBenchmark
             var removes = 0;
             foreach (var viewer in players)
             {
-                var hidden = policy.Hidden(viewer.Slot);
-                while (hidden != 0)
+                foreach (var index in policy.HiddenIndices(viewer.Slot))
                 {
-                    bits[viewer.Slot, policy.EntityIndex(ParticleVisibility.PopSlot(ref hidden))] = false;
+                    bits[viewer.Slot, index] = false;
                     removes++;
                 }
             }

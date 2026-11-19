@@ -155,6 +155,7 @@ public class VipCore : BasePlugin
         {
             if (enabled)
                 foreach (var player in Utilities.GetPlayers()) RefreshVipStatus(player);
+            VipApi.NotifyFeatureAvailabilityChanged();
         };
         AddTimer(300.0f, () =>
         {
@@ -422,6 +423,7 @@ public class VipCore : BasePlugin
                 VipApi.SetPlayerFeatureState(player, key, state));
         }
 
+        VipApi.NotifyFeatureAvailabilityChanged();
         const string msg = "configuration successfully rebooted!";
 
         ReplyToCommand(controller, msg);

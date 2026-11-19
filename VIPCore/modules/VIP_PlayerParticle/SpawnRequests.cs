@@ -2,20 +2,20 @@ namespace VIP_PlayerParticle;
 
 internal sealed class SpawnRequests
 {
-    private readonly (ulong Request, uint Pawn)[] _pending = new (ulong, uint)[ParticleVisibility.Slots];
+    private readonly (ulong Request, uint Controller)[] _pending = new (ulong, uint)[ParticleVisibility.Slots];
     private ulong _lastRequest;
 
-    internal bool TryQueue(int slot, uint pawn, out ulong request)
+    internal bool TryQueue(int slot, uint controller, out ulong request)
     {
         var pending = _pending[slot];
-        if (pending.Request != 0 && pending.Pawn == pawn)
+        if (pending.Request != 0 && pending.Controller == controller)
         {
             request = pending.Request;
             return false;
         }
 
         request = ++_lastRequest;
-        _pending[slot] = (request, pawn);
+        _pending[slot] = (request, controller);
         return true;
     }
 

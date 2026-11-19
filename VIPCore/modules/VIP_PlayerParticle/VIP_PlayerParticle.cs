@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
@@ -6,6 +7,8 @@ using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Utils;
+using CounterStrikeSharp.API.Modules.Timers;
+using Timer = CounterStrikeSharp.API.Modules.Timers.Timer;
 using Microsoft.Extensions.Logging;
 using VipCoreApi;
 using static VipCoreApi.IVipCoreApi;
@@ -16,12 +19,13 @@ public class VipPlayerParticle : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Particle";
-    public override string ModuleVersion => "1.0.3";
+    public override string ModuleVersion => "1.0.4";
     public override string ModuleDescription => "Attaches a selectable particle effect to VIP players";
 
     private PlayerParticle? _feature;
     private IVipCoreApi? _api;
     private HashSet<string>? _precached;
+    private Timer? _retry;
     private bool _unloaded;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
@@ -44,9 +48,15 @@ public class VipPlayerParticle : BasePlugin
         }
         catch (KeyNotFoundException)
         {
+            _api = null;
+        }
+        if (_api == null)
+        {
+            _retry ??= AddTimer(5f, Initialize, TimerFlags.REPEAT);
             return;
         }
-        if (_api == null) return;
+        _retry?.Kill();
+        _retry = null;
         _api.OnCoreReady += RegisterFeature;
         // The core-ready event has already fired when loading this module on a live server.
         RegisterFeature();
@@ -63,6 +73,7 @@ public class VipPlayerParticle : BasePlugin
     public override void Unload(bool hotReload)
     {
         _unloaded = true;
+        _retry?.Kill();
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeature;
         if (_feature == null) return;
@@ -92,7 +103,7 @@ public class VipPlayerParticle : BasePlugin
                 !doc.RootElement.TryGetProperty("Groups", out var groups) || groups.ValueKind != JsonValueKind.Object)
                 return;
 
-            var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var files = new HashSet<string>(StringComparer.Ordinal);
             foreach (var group in groups.EnumerateObject())
             {
                 if (group.Value.ValueKind != JsonValueKind.Object ||
@@ -166,6 +177,8 @@ public class PlayerParticle : VipFeatureBase
     private readonly ParticleVisibility _visibility = new();
     private readonly BasePlugin _plugin;
     private readonly Func<HashSet<string>?> _getPrecached;
+    private readonly EventInfo? _featureStateEvent;
+    private readonly EventInfo? _availabilityEvent;
     private readonly Listeners.CheckTransmit _checkTransmit;
     private readonly Listeners.OnEntityDeleted _entityDeleted;
     private bool _transmitRegistered;
@@ -174,6 +187,7 @@ public class PlayerParticle : VipFeatureBase
     private bool _stopped;
     private uint _mapGeneration;
     private bool _reloadQueued;
+    private bool _roundEnded;
 
     internal PlayerParticle(BasePlugin plugin, IVipCoreApi api, Func<HashSet<string>?> getPrecached) : base(api)
     {
@@ -181,6 +195,12 @@ public class PlayerParticle : VipFeatureBase
         _getPrecached = getPrecached;
         _checkTransmit = OnCheckTransmit;
         _entityDeleted = OnEntityDeleted;
+        // Older shared VipCoreApi binaries do not contain IVipFeatureStateApi.
+        _featureStateEvent = api.GetType().GetEvent("PlayerFeatureStateSet");
+        _featureStateEvent?.AddEventHandler(api, (Action<CCSPlayerController, string, FeatureState>)OnFeatureStateSet);
+
+        _availabilityEvent = api.GetType().GetEvent("FeatureAvailabilityChanged");
+        _availabilityEvent?.AddEventHandler(api, (Action)QueueRestore);
 
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
@@ -188,7 +208,7 @@ public class PlayerParticle : VipFeatureBase
             {
                 var slot = player.Slot;
                 QueueSpawn(player, slot);
-                UpdateViewer(slot, player.TeamNum);
+                ObserveViewer(player, slot, player.TeamNum);
             }
             return HookResult.Continue;
         });
@@ -199,19 +219,31 @@ public class PlayerParticle : VipFeatureBase
         });
         plugin.RegisterEventHandler<EventPlayerTeam>((ev, _) =>
         {
-            var slot = ev.Userid?.Slot ?? -1;
-            EndSpawn(slot);
-            if (ValidSlot(slot) && !ev.Disconnect)
-                UpdateViewer(slot, ev.Team);
+            if (ev.Userid is { IsValid: true } player && ValidSlot(player.Slot))
+            {
+                EndSpawn(player.Slot);
+                if (!ev.Disconnect) ObserveViewer(player, player.Slot, ev.Team);
+            }
+            return HookResult.Continue;
+        });
+        plugin.RegisterEventHandler<EventRoundPrestart>((_, _) =>
+        {
+            _roundEnded = false;
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
-            RemoveAll();
+            // Also support game modes that start a round without round_prestart.
+            if (_roundEnded)
+            {
+                _roundEnded = false;
+                QueueRestore();
+            }
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventRoundEnd>((_, _) =>
         {
+            _roundEnded = true;
             _spawns.Clear();
             RemoveAll();
             return HookResult.Continue;
@@ -224,8 +256,17 @@ public class PlayerParticle : VipFeatureBase
         });
         plugin.RegisterListener<Listeners.OnClientPutInServer>(slot =>
         {
-            if (_viewersInitialized && ValidSlot(slot) && Utilities.GetPlayerFromSlot(slot) is { IsValid: true } player)
-                UpdateViewer(slot, player.TeamNum);
+            if (!_viewersInitialized || !ValidSlot(slot)) return;
+            if (Utilities.GetPlayerFromSlot(slot) is { IsValid: true } player)
+                ObserveViewer(player, slot, player.TeamNum);
+            else
+                UpdateViewer(slot, 0);
+        });
+        plugin.RegisterEventHandler<EventPlayerConnectFull>((ev, _) =>
+        {
+            if (ev.Userid is { IsValid: true } player && ValidSlot(player.Slot))
+                ObserveViewer(player, player.Slot, player.TeamNum);
+            return HookResult.Continue;
         });
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
@@ -235,22 +276,29 @@ public class PlayerParticle : VipFeatureBase
             _visibility.SetViewer(slot, false, 0, MineMode.All, OthersMode.All, true);
             SyncTransmit();
         });
-        plugin.AddCommandListener("css_vip_reload", (player, _) =>
+        if (_availabilityEvent == null)
         {
-            if (!_reloadQueued && _getPrecached() != null &&
-                (player == null || AdminManager.PlayerHasPermissions(player, "@css/root")))
+            // Older VIPCore versions expose config reload only as a command.
+            plugin.AddCommandListener("css_vip_reload", (player, _) =>
             {
-                _reloadQueued = true;
-                var map = _mapGeneration;
-                Server.NextFrame(() =>
-                {
-                    if (_stopped || map != _mapGeneration) return;
-                    _reloadQueued = false;
-                    RestorePlayers();
-                });
-            }
-            return HookResult.Continue;
-        }, HookMode.Post);
+                if (player == null || AdminManager.PlayerHasPermissions(player, "@css/root"))
+                    QueueRestore();
+                return HookResult.Continue;
+            }, HookMode.Post);
+        }
+    }
+
+    private void QueueRestore()
+    {
+        if (_stopped || _reloadQueued || _getPrecached() == null) return;
+        _reloadQueued = true;
+        var map = _mapGeneration;
+        Server.NextFrame(() =>
+        {
+            if (_stopped || map != _mapGeneration) return;
+            _reloadQueued = false;
+            RestorePlayers();
+        });
     }
 
     internal void RestorePlayers()
@@ -260,7 +308,7 @@ public class PlayerParticle : VipFeatureBase
         var players = Utilities.GetPlayers();
         InitializeViewers(players);
         foreach (var player in players)
-            if (!player.IsBot && ValidSlot(player.Slot) && (_active[player.Slot] != null || IsClientVip(player)))
+            if (!player.IsBot && ValidSlot(player.Slot) && (_prefs[player.Slot] != null || IsClientVip(player)))
                 Apply(player);
     }
 
@@ -272,9 +320,9 @@ public class PlayerParticle : VipFeatureBase
         {
             var slot = player.Slot;
             if (!ValidSlot(slot)) continue;
-            if (!player.IsBot && IsClientVip(player))
+            if (!player.IsBot && HasAccess(player))
                 Load(player, slot);
-            UpdateViewer(slot, player.TeamNum);
+            ObserveViewer(player, slot, player.TeamNum);
         }
     }
 
@@ -287,6 +335,8 @@ public class PlayerParticle : VipFeatureBase
     private void ClearMap()
     {
         _mapGeneration++;
+        _roundEnded = false;
+        Array.Clear(_prefs);
         _reloadQueued = false;
         _spawns.Clear();
         Array.Clear(_active);
@@ -303,8 +353,9 @@ public class PlayerParticle : VipFeatureBase
         Api.OnPlayerSpawn -= OnPlayerSpawn;
         Api.PlayerLoaded -= OnPlayerLoaded;
         Api.PlayerRemoved -= OnPlayerRemoved;
+        _availabilityEvent?.RemoveEventHandler(Api, (Action)QueueRestore);
+        _featureStateEvent?.RemoveEventHandler(Api, (Action<CCSPlayerController, string, FeatureState>)OnFeatureStateSet);
         EndMap();
-        Array.Clear(_prefs);
     }
 
     public override void OnPlayerLoaded(CCSPlayerController player, string group)
@@ -312,10 +363,13 @@ public class PlayerParticle : VipFeatureBase
         if (_stopped || !player.IsValid || player.IsBot || !ValidSlot(player.Slot)) return;
         var slot = player.Slot;
         _prefs[slot] = null;
-        var prefs = Load(player, slot);
-        UpdateViewer(slot, player.TeamNum);
-        if (_getPrecached() != null)
-            Apply(player, prefs);
+        Apply(player);
+    }
+
+    private void OnFeatureStateSet(CCSPlayerController player, string feature, FeatureState state)
+    {
+        if (feature == Feature && !_stopped && player.IsValid && !player.IsBot && ValidSlot(player.Slot))
+            Apply(player);
     }
 
     public override void OnPlayerRemoved(CCSPlayerController player, string group)
@@ -324,7 +378,7 @@ public class PlayerParticle : VipFeatureBase
         var slot = player.Slot;
         EndSpawn(slot);
         _prefs[slot] = null;
-        UpdateViewer(slot, player.TeamNum);
+        ObserveViewer(player, slot, player.TeamNum);
     }
 
     // ---- menu -------------------------------------------------------------------------------
@@ -460,6 +514,7 @@ public class PlayerParticle : VipFeatureBase
             }
         }
 
+        if (loaded.Height is { } height && !float.IsFinite(height)) loaded.Height = null;
         if (!Enum.IsDefined(loaded.Mine)) loaded.Mine = MineMode.All;
         if (!Enum.IsDefined(loaded.Others)) loaded.Others = OthersMode.All;
 
@@ -474,7 +529,7 @@ public class PlayerParticle : VipFeatureBase
     }
 
     private static bool ValidEntry(PlayerParticleEntry? entry) =>
-        entry is { Name.Length: > 0, Particle.Length: > 0 };
+        entry is { Name.Length: > 0, Particle.Length: > 0 } && float.IsFinite(entry.Offset);
 
     private static PlayerParticleEntry? FindEntry(List<PlayerParticleEntry>? entries, string? name)
     {
@@ -513,13 +568,13 @@ public class PlayerParticle : VipFeatureBase
 
     private void QueueSpawn(CCSPlayerController player, int slot)
     {
-        if (_getPrecached() == null || player.IsBot || !IsClientVip(player))
+        if (player.IsBot || !HasAccess(player))
         {
+            _prefs[slot] = null;
             EndSpawn(slot);
             return;
         }
-        var prefs = Load(player, slot);
-        if (!HasSelection(prefs) || !PlayerHasFeature(player) || GetPlayerFeatureState(player) != FeatureState.Enabled)
+        if (_roundEnded || _getPrecached() == null || !HasSelection(Load(player, slot)))
         {
             EndSpawn(slot);
             return;
@@ -528,13 +583,14 @@ public class PlayerParticle : VipFeatureBase
         var pawn = player.PlayerPawn.Raw;
         if (_active[slot] is { } active && active.Pawn != pawn)
             Remove(slot);
+        // player_spawn can precede assignment of the new pawn. Pin the controller and resolve its pawn next frame.
         var controller = player.EntityHandle.Raw;
-        if (!_spawns.TryQueue(slot, pawn, out var request)) return;
+        if (!_spawns.TryQueue(slot, controller, out var request)) return;
         Server.NextFrame(() =>
         {
             if (_stopped || !_spawns.Take(slot, request)) return;
             if (Utilities.GetPlayerFromSlot(slot) is { IsValid: true } current &&
-                current.EntityHandle.Raw == controller && current.PlayerPawn.Raw == pawn)
+                current.EntityHandle.Raw == controller)
                 Apply(current);
         });
     }
@@ -546,24 +602,28 @@ public class PlayerParticle : VipFeatureBase
         Remove(slot);
     }
 
-    private void Apply(CCSPlayerController player, Prefs? prefs = null)
+    private void Apply(CCSPlayerController player)
     {
         var slot = player.Slot;
         if (!HasAccess(player))
         {
-            Remove(slot);
+            _prefs[slot] = null;
+            EndSpawn(slot);
+            UpdateViewer(slot, player.TeamNum);
             return;
         }
 
-        prefs ??= Load(player, slot);
-        ApplySelection(player, prefs, HasSelection(prefs) ? Current(prefs, GetEntries(player)) : null);
+        var prefs = Load(player, slot);
+        UpdateViewer(slot, player.TeamNum);
+        var selected = !_roundEnded && _getPrecached() != null && HasSelection(prefs);
+        ApplySelection(player, prefs, selected ? Current(prefs, GetEntries(player)) : null);
     }
 
     private void ApplySelection(CCSPlayerController player, Prefs prefs, PlayerParticleEntry? entry)
     {
         var slot = player.Slot;
         var precached = _getPrecached();
-        if (entry == null || precached == null || !precached.Contains(entry.Particle))
+        if (_roundEnded || entry == null || precached == null || !precached.Contains(entry.Particle))
         {
             Remove(slot);
             return;
@@ -668,11 +728,14 @@ public class PlayerParticle : VipFeatureBase
         _deletionRegistered = false;
     }
 
-    private void UpdateViewer(int slot, int team)
+    private void ObserveViewer(CCSPlayerController player, int slot, int team) =>
+        UpdateViewer(slot, team, !player.IsBot || player.IsHLTV);
+
+    private void UpdateViewer(int slot, int team, bool connected = true)
     {
         if (!_viewersInitialized) return;
         var prefs = _prefs[slot];
-        _visibility.SetViewer(slot, true, team, prefs?.Mine ?? MineMode.All, prefs?.Others ?? OthersMode.All,
+        _visibility.SetViewer(slot, connected, team, prefs?.Mine ?? MineMode.All, prefs?.Others ?? OthersMode.All,
             prefs?.SeeOwn ?? true);
         SyncTransmit();
     }
@@ -696,9 +759,8 @@ public class PlayerParticle : VipFeatureBase
             var slot = viewer.Slot;
             if (!ValidSlot(slot)) continue;
 
-            var hidden = _visibility.Hidden(slot);
-            while (hidden != 0)
-                info.TransmitEntities.Remove(_visibility.EntityIndex(ParticleVisibility.PopSlot(ref hidden)));
+            foreach (var index in _visibility.HiddenIndices(slot))
+                info.TransmitEntities.Remove(index);
         }
     }
 }

@@ -16,6 +16,10 @@ internal sealed class ParticleVisibility
     private readonly int[] _entityIndices = new int[Slots];
     private readonly UInt128[] _hidden = new UInt128[Slots];
     private readonly UInt128[] _hiddenFrom = new UInt128[Slots];
+    // Reuse a contiguous list between snapshots. A busy tick then only walks the indices to remove.
+    private readonly int[] _hiddenIndices = new int[Slots * Slots];
+    private readonly byte[] _hiddenCounts = new byte[Slots];
+    private const byte Dirty = byte.MaxValue;
     private UInt128 _owners;
     private UInt128 _teamOnlyOwners;
     private UInt128 _selfOnlyOwners;
@@ -25,10 +29,25 @@ internal sealed class ParticleVisibility
     private int _restrictedViewers;
 
     internal bool NeedsFilter => _restrictedViewers != 0;
-    internal UInt128 Hidden(int viewer) => _hidden[viewer];
-    internal int EntityIndex(int owner) => _entityIndices[owner];
 
-    internal static int PopSlot(ref UInt128 slots)
+    internal ReadOnlySpan<int> HiddenIndices(int viewer)
+    {
+        var offset = viewer * Slots;
+        var count = _hiddenCounts[viewer];
+        if (count == Dirty) count = RebuildIndices(viewer, offset);
+        return _hiddenIndices.AsSpan(offset, count);
+    }
+
+    private byte RebuildIndices(int viewer, int offset)
+    {
+        byte count = 0;
+        var hidden = _hidden[viewer];
+        while (hidden != 0)
+            _hiddenIndices[offset + count++] = _entityIndices[PopSlot(ref hidden)];
+        return _hiddenCounts[viewer] = count;
+    }
+
+    private static int PopSlot(ref UInt128 slots)
     {
         var slot = (ulong)slots != 0
             ? BitOperations.TrailingZeroCount((ulong)slots)
@@ -69,6 +88,12 @@ internal sealed class ParticleVisibility
     internal void SetParticle(int slot, int entityIndex)
     {
         if (_entityIndices[slot] == entityIndex) return;
+        // A direct replacement changes the index even when the owner mask stays identical.
+        if (_entityIndices[slot] != 0 && entityIndex != 0)
+        {
+            var viewers = _hiddenFrom[slot];
+            while (viewers != 0) _hiddenCounts[PopSlot(ref viewers)] = Dirty;
+        }
         _entityIndices[slot] = entityIndex;
         var bit = Bit(slot);
         _owners = SetBit(_owners, bit, entityIndex != 0);
@@ -140,6 +165,8 @@ internal sealed class ParticleVisibility
     {
         if (_hidden[viewer] == 0 && hidden != 0) _restrictedViewers++;
         else if (_hidden[viewer] != 0 && hidden == 0) _restrictedViewers--;
+        if (_hidden[viewer] != hidden)
+            _hiddenCounts[viewer] = hidden == 0 ? (byte)0 : Dirty;
         _hidden[viewer] = hidden;
     }
 
@@ -150,6 +177,7 @@ internal sealed class ParticleVisibility
         Array.Clear(_entityIndices);
         Array.Clear(_hidden);
         Array.Clear(_hiddenFrom);
+        Array.Clear(_hiddenCounts);
         _owners = _teamOnlyOwners = _selfOnlyOwners = 0;
         _connected = _teamOnlyViewers = _hideOthersViewers = 0;
         _restrictedViewers = 0;

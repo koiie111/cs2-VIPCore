@@ -60,6 +60,16 @@ internal static class FeatureReloadTests
         var user = core.Users[1];
         var toggle = new TestToggle(api);
         api.RegisterFeature(toggle);
+        typeof(VipCore).GetField(nameof(VipCore.ForcedDisabledFeatures))!
+            .SetValue(core, new HashSet<string>());
+        var globalChanges = new List<int>();
+        ((IVipFeatureAvailabilityApi)api).FeatureAvailabilityChanged += () =>
+            globalChanges.Add(core.ForcedDisabledFeatures.Count);
+        api.DisableAllFeatures();
+        api.EnableAllFeatures();
+        Require(globalChanges.SequenceEqual(new[] { core.Features.Count, 0 }),
+            "Each global switch notifies once after updating all features");
+
         var configuredGroup = core.Config;
         var withoutToggle = new Config();
         configuredGroup.Groups["VIP"].Values[toggle.Feature] = 1;

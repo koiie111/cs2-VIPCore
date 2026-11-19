@@ -102,6 +102,7 @@ namespace CounterStrikeSharp.API.Core
         public int Slot { get; init; }
         public ulong SteamID { get; init; }
         public bool IsBot { get; init; }
+        public bool IsHLTV { get; init; }
         public int TeamNum { get; set; } = 2;
         public CHandle<Pawn> PlayerPawn { get; set; } = new(0);
     }
@@ -118,8 +119,12 @@ namespace CounterStrikeSharp.API.Core
         public bool StartActive { get; set; }
         internal Vector? Origin { get; private set; }
         public void Teleport(Vector position, QAngle angle, Vector velocity) => Origin = position;
+        internal Pawn? Parent { get; private set; }
         public void DispatchSpawn() { }
-        public void AcceptInput(string input, Pawn? activator = null, Pawn? caller = null, string? value = null) { }
+        public void AcceptInput(string input, Pawn? activator = null, Pawn? caller = null, string? value = null)
+        {
+            if (input == "SetParent") Parent = activator;
+        }
     }
 
     public sealed class CCheckTransmitInfo
@@ -142,6 +147,8 @@ namespace CounterStrikeSharp.API.Core
     public sealed record EventPlayerSpawn(CCSPlayerController? Userid);
     public sealed record EventPlayerDeath(CCSPlayerController? Userid);
     public sealed record EventPlayerTeam(CCSPlayerController? Userid, int Team, bool Disconnect = false);
+    public sealed record EventPlayerConnectFull(CCSPlayerController? Userid);
+    public sealed class EventRoundPrestart;
     public sealed class EventRoundStart;
     public sealed class EventRoundEnd;
 
@@ -162,6 +169,13 @@ namespace CounterStrikeSharp.API.Core
         private readonly Dictionary<Type, Delegate> _listeners = new();
         private readonly Dictionary<Type, Delegate> _events = new();
         internal Func<CCSPlayerController?, object?, HookResult>? Reload;
+        internal readonly List<Modules.Timers.Timer> Timers = new();
+        public Modules.Timers.Timer AddTimer(float interval, Action callback, Modules.Timers.TimerFlags flags)
+        {
+            var timer = new Modules.Timers.Timer(callback);
+            Timers.Add(timer);
+            return timer;
+        }
         public object Logger => this;
         public abstract string ModuleAuthor { get; }
         public abstract string ModuleName { get; }
@@ -187,7 +201,22 @@ namespace CounterStrikeSharp.API.Core
             if (_listeners.TryGetValue(typeof(T), out var listener))
                 foreach (var callback in listener.GetInvocationList()) call((T)callback);
         }
-        internal void Fire<T>(T ev) => ((Func<T, object?, HookResult>)_events[typeof(T)])(ev, null);
+        internal void Fire<T>(T ev)
+        {
+            if (_events.TryGetValue(typeof(T), out var handler))
+                ((Func<T, object?, HookResult>)handler)(ev, null);
+        }
+    }
+}
+
+namespace CounterStrikeSharp.API.Modules.Timers
+{
+    public enum TimerFlags { REPEAT }
+    public sealed class Timer(Action callback)
+    {
+        public bool Active { get; private set; } = true;
+        public void Kill() => Active = false;
+        public void Fire() { if (Active) callback(); }
     }
 }
 
@@ -234,8 +263,8 @@ namespace VipCoreApi
         public virtual void OnPlayerRemoved(CCSPlayerController player, string group) { }
         public virtual void OnSelectItem(CCSPlayerController player, FeatureState state) { }
         public bool IsClientVip(CCSPlayerController player) => Core.Groups.ContainsKey(player.SteamID);
-        public bool PlayerHasFeature(CCSPlayerController player) => Core.Entries.ContainsKey(Core.Groups[player.SteamID]);
-        public FeatureState GetPlayerFeatureState(CCSPlayerController player) => FeatureState.Enabled;
+        public bool PlayerHasFeature(CCSPlayerController player) => Core.Available && Core.Entries.ContainsKey(Core.Groups[player.SteamID]);
+        public FeatureState GetPlayerFeatureState(CCSPlayerController player) => Core.States.GetValueOrDefault(player.SteamID, FeatureState.Enabled);
         public T GetFeatureValue<T>(CCSPlayerController player)
         {
             Core.Deserializations++;
@@ -248,7 +277,7 @@ namespace VipCoreApi
         public void PrintToChat(CCSPlayerController player, string message) { }
     }
 
-    internal sealed class FakeApi(string configDirectory) : IVipCoreApi
+    internal class FakeApi(string configDirectory) : IVipCoreApi
     {
         public event Action? OnCoreReady;
         public event Action<CCSPlayerController>? OnPlayerSpawn;
@@ -256,6 +285,14 @@ namespace VipCoreApi
         public event Action<CCSPlayerController, string>? PlayerRemoved;
         public string CoreConfigDirectory => configDirectory;
         internal VipFeatureBase? Feature;
+        public event Action<CCSPlayerController, string, FeatureState>? PlayerFeatureStateSet;
+        internal readonly Dictionary<ulong, FeatureState> States = new();
+        internal void SetState(CCSPlayerController player, FeatureState state)
+        {
+            States[player.SteamID] = state;
+            PlayerFeatureStateSet?.Invoke(player, "PlayerParticle", state);
+        }
+        internal bool Available = true;
         internal int Deserializations;
         internal readonly Dictionary<ulong, string> Groups = new();
         internal readonly Dictionary<string, string> Entries = new();
@@ -274,8 +311,15 @@ namespace VipCoreApi
             PlayerRemoved?.Invoke(player, Groups[player.SteamID]);
             Groups.Remove(player.SteamID);
         }
-        internal bool HasCallbacks => OnCoreReady != null || OnPlayerSpawn != null || PlayerLoaded != null ||
-                                       PlayerRemoved != null;
+        internal virtual bool HasCallbacks => OnCoreReady != null || OnPlayerSpawn != null || PlayerLoaded != null ||
+                                       PlayerRemoved != null || PlayerFeatureStateSet != null;
+    }
+
+    internal sealed class NotifyingApi(string directory) : FakeApi(directory)
+    {
+        public event Action? FeatureAvailabilityChanged;
+        internal void NotifyAvailability() => FeatureAvailabilityChanged?.Invoke();
+        internal override bool HasCallbacks => base.HasCallbacks || FeatureAvailabilityChanged != null;
     }
 
     public sealed class TestMenu
