@@ -95,22 +95,25 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
         }
     }
 
-    public FeatureState GetPlayerFeatureState(CCSPlayerController player, string feature)
+    public FeatureState GetPlayerFeatureState(CCSPlayerController player, string feature) =>
+        GetPlayerFeatureState(VipCore.GetPlayerSteamId(player), feature);
+
+    internal FeatureState GetPlayerFeatureState(ulong steamId, string feature)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
+        if (!_vipCore.Users.TryGetValue(steamId, out var user))
             throw new InvalidOperationException("player not found");
 
         return user.FeatureState.GetValueOrDefault(feature, FeatureState.NoAccess);
     }
 
     public FeatureState GetPlayerFeatureStateOrDefault(CCSPlayerController player, string feature) =>
-        _vipCore.Users.TryGetValue(player.SteamID, out var user)
+        _vipCore.Users.TryGetValue(VipCore.GetPlayerSteamId(player), out var user)
             ? user.FeatureState.GetValueOrDefault(feature, FeatureState.NoAccess)
             : FeatureState.NoAccess;
 
     public void SetPlayerFeatureState(CCSPlayerController player, string feature, FeatureState newState)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
+        if (!_vipCore.Users.TryGetValue(VipCore.GetPlayerSteamId(player), out var user))
             throw new InvalidOperationException("player not found");
 
         if (!user.FeatureState.TryGetValue(feature, out var oldState))
@@ -145,7 +148,7 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
     {
         if (_vipCore.ForcedDisabledFeatures.Contains(feature)) return false;
 
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user)) return false;
+        if (!_vipCore.Users.TryGetValue(VipCore.GetPlayerSteamId(player), out var user)) return false;
 
         if (user is null or { group: null }) return false;
 
@@ -156,7 +159,7 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
 
     public string GetClientVipGroup(CCSPlayerController player)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
+        if (!_vipCore.Users.TryGetValue(VipCore.GetPlayerSteamId(player), out var user))
             throw new InvalidOperationException("player not found");
 
         return user.group;
@@ -173,8 +176,7 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
 
     public void UpdateClientVip(CCSPlayerController player, string name = "", string group = "", int time = -1)
     {
-        var steamId =
-            new SteamID(player.AuthorizedSteamID == null ? player.SteamID : player.AuthorizedSteamID.SteamId64);
+        var steamId = new SteamID(VipCore.GetPlayerSteamId(player));
 
         Task.Run(() => _vipCore.Database.UpdateUserVip(steamId.AccountId, name, group, time));
 
@@ -268,7 +270,7 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
 
     public void RemoveClientVip(CCSPlayerController player)
     {
-        var steamId = new SteamID(player.SteamID);
+        var steamId = new SteamID(VipCore.GetPlayerSteamId(player));
 
         if (!_vipCore.Users.TryGetValue(steamId.SteamId64, out var user))
             throw new InvalidOperationException("player not found");
@@ -340,7 +342,7 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
 
     public T GetFeatureValue<T>(CCSPlayerController player, string feature)
     {
-        if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
+        if (!_vipCore.Users.TryGetValue(VipCore.GetPlayerSteamId(player), out var user))
             throw new InvalidOperationException("User not found.");
 
         if (_vipCore.Config.Groups.TryGetValue(user.group, out var vipGroup))
