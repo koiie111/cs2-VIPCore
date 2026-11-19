@@ -105,13 +105,14 @@ public class VipCore : BasePlugin
         if (player == null) return HookResult.Continue;
 
         IsClientVip[player.Slot] = false;
-        if (!Users.TryRemove(player.SteamID, out var user)) return HookResult.Continue;
+        var steamId = GetPlayerSteamId(player);
+        if (!Users.TryRemove(steamId, out var user)) return HookResult.Continue;
 
         foreach (var (key, state) in user.FeatureState)
         {
             if (state != FeatureState.NoAccess && Features.TryGetValue(key, out var feature) &&
                 feature.FeatureType == FeatureType.Toggle)
-                VipApi.SetPlayerCookie(player.SteamID, key, (int)state);
+                VipApi.SetPlayerCookie(steamId, key, (int)state);
         }
 
         var authAccId = player.AuthorizedSteamID;
@@ -176,7 +177,7 @@ public class VipCore : BasePlugin
         var wasVip = IsClientVip[player.Slot];
         IsClientVip[player.Slot] = IsUserActiveVip(player);
         // Authorization while css_vip_enable was off left modules without a PlayerLoaded event.
-        if (!wasVip && IsClientVip[player.Slot] && Users.TryGetValue(player.SteamID, out var user))
+        if (!wasVip && IsClientVip[player.Slot] && Users.TryGetValue(GetPlayerSteamId(player), out var user))
             VipApi.OnPlayerLoaded(player, user.group);
     }
 
@@ -299,10 +300,10 @@ public class VipCore : BasePlugin
 
         if (player == null) return;
 
-        Users.TryAdd(player.SteamID, user);
+        Users.TryAdd(GetPlayerSteamId(player), user);
         IsClientVip[player.Slot] = true;
 
-        SetClientFeature(player.SteamID, user.group);
+        SetClientFeature(GetPlayerSteamId(player), user.group);
         VipApi.OnPlayerLoaded(player, user.group);
     }
 
@@ -332,9 +333,10 @@ public class VipCore : BasePlugin
     {
         if (player != null)
         {
-            VipApi.OnPlayerRemoved(player, Users[player.SteamID].group);
+            var steamId = GetPlayerSteamId(player);
+            VipApi.OnPlayerRemoved(player, Users[steamId].group);
 
-            Users.TryRemove(player.SteamID, out _);
+            Users.TryRemove(steamId, out _);
             IsClientVip[player.Slot] = false;
         }
 
@@ -376,13 +378,14 @@ public class VipCore : BasePlugin
 
         if (player != null)
         {
-            if (!Users.TryGetValue(player.SteamID, out var user)) return;
+            var steamId = GetPlayerSteamId(player);
+            if (!Users.TryGetValue(steamId, out var user)) return;
 
             if (time >= 0) user.expires = time == 0 ? 0 : CalculateEndTimeInSeconds(time);
             if (vipGroup.Length > 0 && vipGroup != user.group)
             {
                 user.group = vipGroup;
-                SetClientFeature(player.SteamID, vipGroup);
+                SetClientFeature(steamId, vipGroup);
                 VipApi.OnPlayerLoaded(player, vipGroup);
             }
         }
@@ -417,8 +420,9 @@ public class VipCore : BasePlugin
         LoadConfig();
         foreach (var player in Utilities.GetPlayers())
         {
-            if (!Users.TryGetValue(player.SteamID, out var user)) continue;
-            RefreshGroupAccess(player.SteamID, user, previous, (key, state) =>
+            var steamId = GetPlayerSteamId(player);
+            if (!Users.TryGetValue(steamId, out var user)) continue;
+            RefreshGroupAccess(steamId, user, previous, (key, state) =>
                 VipApi.SetPlayerFeatureState(player, key, state));
         }
 
@@ -476,7 +480,7 @@ public class VipCore : BasePlugin
             return;
         }
 
-        if (!Users.TryGetValue(player.SteamID, out var user)) return;
+        if (!Users.TryGetValue(GetPlayerSteamId(player), out var user)) return;
 
         var menu = VipApi.CreateMenu(Localizer["menu.Title", user.group]);
         if (Config.Groups.TryGetValue(user.group, out var vipGroup))
@@ -513,7 +517,7 @@ public class VipCore : BasePlugin
                         // An open menu can outlive its module, VIP record or displayed toggle state.
                         if (!VipApi.IsClientVip(controller) || !VipApi.PlayerHasFeature(controller, key) ||
                             !Features.TryGetValue(key, out var currentFeature) || currentFeature != feature ||
-                            !Users.TryGetValue(controller.SteamID, out var currentUser) || currentUser != user ||
+                            !Users.TryGetValue(GetPlayerSteamId(controller), out var currentUser) || currentUser != user ||
                             !user.FeatureState.TryGetValue(key, out var currentState) || currentState != featureState)
                         {
                             CreateMenu(controller);
@@ -576,6 +580,12 @@ public class VipCore : BasePlugin
         Console.WriteLine("OK!");
         return builder.ConnectionString;
     }
+
+    internal static ulong GetPlayerSteamId(CCSPlayerController player) =>
+        GetPlayerSteamId(player.AuthorizedSteamID?.SteamId64, player.SteamID);
+
+    internal static ulong GetPlayerSteamId(ulong? authorizedSteamId, ulong controllerSteamId) =>
+        authorizedSteamId ?? controllerSteamId;
 
     public bool IsPlayerVip(CCSPlayerController player)
     {
