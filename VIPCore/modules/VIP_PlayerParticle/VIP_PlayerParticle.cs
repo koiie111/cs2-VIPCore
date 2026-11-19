@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
+using CounterStrikeSharp.API.Modules.Admin;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
 using VipCoreApi;
@@ -15,19 +16,20 @@ public class VipPlayerParticle : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Particle";
-    public override string ModuleVersion => "1.0.2";
+    public override string ModuleVersion => "1.0.3";
     public override string ModuleDescription => "Attaches a selectable particle effect to VIP players";
 
     private PlayerParticle? _feature;
     private IVipCoreApi? _api;
-    private bool _resourcesReady;
+    private HashSet<string>? _precached;
+    private bool _unloaded;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     public override void Load(bool hotReload)
     {
         // Particle files must be precached on map load, so this listener lives on the plugin itself.
         RegisterListener<Listeners.OnServerPrecacheResources>(PrecacheParticles);
-        RegisterListener<Listeners.OnMapEnd>(() => _resourcesReady = false);
+        RegisterListener<Listeners.OnMapEnd>(() => _precached = null);
         Server.NextWorldUpdate(Initialize);
     }
 
@@ -35,8 +37,15 @@ public class VipPlayerParticle : BasePlugin
 
     private void Initialize()
     {
-        if (_api != null) return;
-        _api = PluginCapability.Get();
+        if (_unloaded || _api != null) return;
+        try
+        {
+            _api = PluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            return;
+        }
         if (_api == null) return;
         _api.OnCoreReady += RegisterFeature;
         // The core-ready event has already fired when loading this module on a live server.
@@ -46,12 +55,14 @@ public class VipPlayerParticle : BasePlugin
     private void RegisterFeature()
     {
         if (_api == null || _feature != null) return;
-        _feature = new PlayerParticle(this, _api, () => _resourcesReady);
+        _feature = new PlayerParticle(this, _api, () => _precached);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
+        _feature.RestorePlayers();
     }
 
     public override void Unload(bool hotReload)
     {
+        _unloaded = true;
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeature;
         if (_feature == null) return;
@@ -67,7 +78,7 @@ public class VipPlayerParticle : BasePlugin
     /// </summary>
     private void PrecacheParticles(ResourceManifest manifest)
     {
-        _resourcesReady = false;
+        _precached = null;
         var dir = _api?.CoreConfigDirectory ?? Path.Combine(Application.RootDirectory, "configs/plugins/VIPCore/");
         var path = Path.Combine(dir, "vip.json");
         if (!File.Exists(path)) return;
@@ -77,25 +88,30 @@ public class VipPlayerParticle : BasePlugin
             using var doc = JsonDocument.Parse(File.ReadAllText(path),
                 new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
 
-            if (!doc.RootElement.TryGetProperty("Groups", out var groups) || groups.ValueKind != JsonValueKind.Object)
+            if (doc.RootElement.ValueKind != JsonValueKind.Object ||
+                !doc.RootElement.TryGetProperty("Groups", out var groups) || groups.ValueKind != JsonValueKind.Object)
                 return;
 
             var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var group in groups.EnumerateObject())
             {
-                if (!group.Value.TryGetProperty("Values", out var values) ||
+                if (group.Value.ValueKind != JsonValueKind.Object ||
+                    !group.Value.TryGetProperty("Values", out var values) ||
+                    values.ValueKind != JsonValueKind.Object ||
                     !values.TryGetProperty(PlayerParticle.FeatureName, out var entries) ||
                     entries.ValueKind != JsonValueKind.Array)
                     continue;
 
                 foreach (var entry in entries.EnumerateArray())
-                    if (entry.TryGetProperty("particle", out var file) && file.GetString() is { Length: > 0 } name)
+                    if (entry.ValueKind == JsonValueKind.Object &&
+                        entry.TryGetProperty("particle", out var file) && file.ValueKind == JsonValueKind.String &&
+                        file.GetString() is { Length: > 0 } name)
                         files.Add(name);
             }
 
             foreach (var file in files)
                 manifest.AddResource(file);
-            _resourcesReady = true;
+            _precached = files;
         }
         catch (Exception e)
         {
@@ -120,7 +136,6 @@ public class PlayerParticle : VipFeatureBase
     public const string FeatureName = "PlayerParticle";
     private const string CookieKey = "player_particle_prefs";
     private const string Off = "off";
-    private const int MaxPlayers = 64;
 
     private static readonly float[] HeightSteps = { 0f, 10f, 15f, 25f, 40f, 60f, 80f, 100f };
 
@@ -128,12 +143,6 @@ public class PlayerParticle : VipFeatureBase
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
-
-    /// <summary>Who may see the owner's particle.</summary>
-    private enum MineMode { All, Team, Self }
-
-    /// <summary>Whose particles a viewer receives.</summary>
-    private enum OthersMode { All, Team, None }
 
     /// <summary>Per-player settings, stored as one JSON cookie. A null value means "use the config default".</summary>
     private class Prefs
@@ -148,31 +157,52 @@ public class PlayerParticle : VipFeatureBase
 
     public override string Feature => FeatureName;
 
-    private readonly Dictionary<int, Prefs> _prefs = new();
-    private readonly CParticleSystem?[] _active = new CParticleSystem?[MaxPlayers];
-    private readonly int[] _team = new int[MaxPlayers];
-    private bool _stopped;
-    private readonly Func<bool> _resourcesReady;
+    private sealed record ActiveParticle(uint Handle, uint Pawn, string Resource, float Height);
 
-    public PlayerParticle(BasePlugin plugin, IVipCoreApi api, Func<bool> resourcesReady) : base(api)
+    private readonly Prefs?[] _prefs = new Prefs?[ParticleVisibility.Slots];
+    private readonly ActiveParticle?[] _active = new ActiveParticle?[ParticleVisibility.Slots];
+    private readonly SpawnRequests _spawns = new();
+    private readonly Dictionary<uint, int> _particleOwners = new();
+    private readonly ParticleVisibility _visibility = new();
+    private readonly BasePlugin _plugin;
+    private readonly Func<HashSet<string>?> _getPrecached;
+    private readonly Listeners.CheckTransmit _checkTransmit;
+    private readonly Listeners.OnEntityDeleted _entityDeleted;
+    private bool _transmitRegistered;
+    private bool _deletionRegistered;
+    private bool _viewersInitialized;
+    private bool _stopped;
+    private uint _mapGeneration;
+    private bool _reloadQueued;
+
+    internal PlayerParticle(BasePlugin plugin, IVipCoreApi api, Func<HashSet<string>?> getPrecached) : base(api)
     {
-        _resourcesReady = resourcesReady;
+        _plugin = plugin;
+        _getPrecached = getPrecached;
+        _checkTransmit = OnCheckTransmit;
+        _entityDeleted = OnEntityDeleted;
+
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
-            var player = ev.Userid;
-            if (player is not { IsValid: true }) return HookResult.Continue;
-            Remove(player.Slot);
-            Server.NextFrame(() => Apply(player));
+            if (ev.Userid is { IsValid: true } player && ValidSlot(player.Slot))
+            {
+                var slot = player.Slot;
+                QueueSpawn(player, slot);
+                UpdateViewer(slot, player.TeamNum);
+            }
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventPlayerDeath>((ev, _) =>
         {
-            Remove(ev.Userid?.Slot ?? -1);
+            EndSpawn(ev.Userid?.Slot ?? -1);
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventPlayerTeam>((ev, _) =>
         {
-            Remove(ev.Userid?.Slot ?? -1);
+            var slot = ev.Userid?.Slot ?? -1;
+            EndSpawn(slot);
+            if (ValidSlot(slot) && !ev.Disconnect)
+                UpdateViewer(slot, ev.Team);
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
@@ -182,145 +212,219 @@ public class PlayerParticle : VipFeatureBase
         });
         plugin.RegisterEventHandler<EventRoundEnd>((_, _) =>
         {
+            _spawns.Clear();
             RemoveAll();
             return HookResult.Continue;
         });
-        plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
-        plugin.RegisterListener<Listeners.OnMapStart>(_ => Array.Clear(_active));
+        plugin.RegisterListener<Listeners.OnMapEnd>(EndMap);
+        plugin.RegisterListener<Listeners.OnMapStart>(_ =>
+        {
+            // At map start the previous map's entities have already been destroyed.
+            ClearMap();
+        });
+        plugin.RegisterListener<Listeners.OnClientPutInServer>(slot =>
+        {
+            if (_viewersInitialized && ValidSlot(slot) && Utilities.GetPlayerFromSlot(slot) is { IsValid: true } player)
+                UpdateViewer(slot, player.TeamNum);
+        });
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
-            Remove(slot);
-            _prefs.Remove(slot);
+            if (!ValidSlot(slot)) return;
+            EndSpawn(slot);
+            _prefs[slot] = null;
+            _visibility.SetViewer(slot, false, 0, MineMode.All, OthersMode.All, true);
+            SyncTransmit();
         });
-
-        // Module loaded on a live server: pick up VIPs already in game.
-        if (_resourcesReady())
-            foreach (var player in Utilities.GetPlayers())
-                if (!player.IsBot && IsClientVip(player))
-                    Apply(player);
+        plugin.AddCommandListener("css_vip_reload", (player, _) =>
+        {
+            if (!_reloadQueued && _getPrecached() != null &&
+                (player == null || AdminManager.PlayerHasPermissions(player, "@css/root")))
+            {
+                _reloadQueued = true;
+                var map = _mapGeneration;
+                Server.NextFrame(() =>
+                {
+                    if (_stopped || map != _mapGeneration) return;
+                    _reloadQueued = false;
+                    RestorePlayers();
+                });
+            }
+            return HookResult.Continue;
+        }, HookMode.Post);
     }
 
-    /// <summary>Called on plugin unload; CounterStrikeSharp drops handlers and listeners itself.</summary>
+    internal void RestorePlayers()
+    {
+        if (_getPrecached() == null) return;
+
+        var players = Utilities.GetPlayers();
+        InitializeViewers(players);
+        foreach (var player in players)
+            if (!player.IsBot && ValidSlot(player.Slot) && (_active[player.Slot] != null || IsClientVip(player)))
+                Apply(player);
+    }
+
+    private void InitializeViewers(IEnumerable<CCSPlayerController> players)
+    {
+        if (_viewersInitialized) return;
+        _viewersInitialized = true;
+        foreach (var player in players)
+        {
+            var slot = player.Slot;
+            if (!ValidSlot(slot)) continue;
+            if (!player.IsBot && IsClientVip(player))
+                Load(player, slot);
+            UpdateViewer(slot, player.TeamNum);
+        }
+    }
+
+    private void EndMap()
+    {
+        RemoveAll();
+        ClearMap();
+    }
+
+    private void ClearMap()
+    {
+        _mapGeneration++;
+        _reloadQueued = false;
+        _spawns.Clear();
+        Array.Clear(_active);
+        _particleOwners.Clear();
+        _viewersInitialized = false;
+        _visibility.Clear();
+        SyncTransmit();
+        StopWatchingDeletes();
+    }
+
     public void Stop()
     {
         _stopped = true;
-        RemoveAll();
-        _prefs.Clear();
+        Api.OnPlayerSpawn -= OnPlayerSpawn;
+        Api.PlayerLoaded -= OnPlayerLoaded;
+        Api.PlayerRemoved -= OnPlayerRemoved;
+        EndMap();
+        Array.Clear(_prefs);
     }
 
     public override void OnPlayerLoaded(CCSPlayerController player, string group)
     {
-        if (_stopped) return;
-        _prefs.Remove(player.Slot);
-        Apply(player);
+        if (_stopped || !player.IsValid || player.IsBot || !ValidSlot(player.Slot)) return;
+        var slot = player.Slot;
+        _prefs[slot] = null;
+        var prefs = Load(player, slot);
+        UpdateViewer(slot, player.TeamNum);
+        if (_getPrecached() != null)
+            Apply(player, prefs);
     }
 
     public override void OnPlayerRemoved(CCSPlayerController player, string group)
     {
-        Remove(player.Slot);
-        _prefs.Remove(player.Slot);
+        if (_stopped || !player.IsValid || !ValidSlot(player.Slot)) return;
+        var slot = player.Slot;
+        EndSpawn(slot);
+        _prefs[slot] = null;
+        UpdateViewer(slot, player.TeamNum);
     }
 
     // ---- menu -------------------------------------------------------------------------------
 
     public override void OnSelectItem(CCSPlayerController player, FeatureState state)
     {
-        if (_stopped) return;
+        if (!CanEdit(player)) return;
+        var entries = GetEntries(player);
+        if (entries == null || FindEntry(entries, null) == null) return;
+        ShowSettings(player, entries);
+    }
 
-        var entries = TryGetEntries(player);
-        if (entries == null) return;
-
-        var prefs = Load(player);
-        var entry = Current(player, entries);
+    private void ShowSettings(CCSPlayerController player, List<PlayerParticleEntry> entries)
+    {
+        var prefs = Load(player, player.Slot);
+        var entry = Current(prefs, entries);
         var menu = CreateMenu(GetTranslatedText(Feature));
 
         menu.AddMenuOption(GetTranslatedText("playerparticle.Particle",
                 entry?.Name ?? GetTranslatedText("playerparticle.Disable")),
-            (controller, _) => OpenParticles(controller, entries, state));
+            (controller, _) => OpenParticles(controller));
 
         if (entry != null)
         {
-            // Settings cycle on click, are applied at once and reopen the menu so the new value is shown.
             menu.AddMenuOption(GetTranslatedText("playerparticle.Height", Format(prefs.Height ?? entry.Offset)),
-                (controller, _) =>
+                (controller, _) => Edit(controller, (p, current) =>
                 {
-                    var p = Load(controller);
-                    p.Height = Next(HeightSteps, p.Height ?? entry.Offset);
-                    Save(controller);
-                    Apply(controller);
-                    OnSelectItem(controller, state);
-                });
+                    if (current != null) p.Height = Next(HeightSteps, p.Height ?? current.Offset);
+                }, apply: true));
 
-            menu.AddMenuOption(GetTranslatedText("playerparticle.Self", YesNo(prefs.SeeOwn)), (controller, _) =>
-            {
-                var p = Load(controller);
-                p.SeeOwn = !p.SeeOwn;
-                Save(controller);
-                OnSelectItem(controller, state);
-            });
+            menu.AddMenuOption(GetTranslatedText("playerparticle.Self", YesNo(prefs.SeeOwn)),
+                (controller, _) => Edit(controller, (p, _) => p.SeeOwn = !p.SeeOwn));
 
             menu.AddMenuOption(
                 GetTranslatedText("playerparticle.Mine", GetTranslatedText($"playerparticle.mine.{prefs.Mine}")),
-                (controller, _) =>
-                {
-                    var p = Load(controller);
-                    p.Mine = (MineMode)(((int)p.Mine + 1) % 3);
-                    Save(controller);
-                    OnSelectItem(controller, state);
-                });
+                (controller, _) => Edit(controller, (p, _) => p.Mine = (MineMode)(((int)p.Mine + 1) % 3)));
         }
 
-        // Applies to particles of other players, so it stays available while the own effect is off.
         menu.AddMenuOption(
             GetTranslatedText("playerparticle.Others", GetTranslatedText($"playerparticle.others.{prefs.Others}")),
-            (controller, _) =>
-            {
-                var p = Load(controller);
-                p.Others = (OthersMode)(((int)p.Others + 1) % 3);
-                Save(controller);
-                OnSelectItem(controller, state);
-            });
+            (controller, _) => Edit(controller, (p, _) => p.Others = (OthersMode)(((int)p.Others + 1) % 3)));
 
-        menu.AddMenuOption(GetTranslatedText("playerparticle.Reset"), (controller, _) =>
+        menu.AddMenuOption(GetTranslatedText("playerparticle.Reset"), (controller, _) => Edit(controller, (p, _) =>
         {
-            var p = Load(controller);
             p.Height = null;
             p.Mine = MineMode.All;
             p.Others = OthersMode.All;
             p.SeeOwn = true;
-            Save(controller);
-            Apply(controller);
-            OnSelectItem(controller, state);
-        });
+        }, apply: true));
 
         menu.Open(player);
     }
 
-    private void OpenParticles(CCSPlayerController player, List<PlayerParticleEntry> entries, FeatureState state)
+    private void Edit(CCSPlayerController player, Action<Prefs, PlayerParticleEntry?> change, bool apply = false)
     {
-        var current = Current(player, entries)?.Name ?? Off;
+        if (!CanEdit(player)) return;
+        var entries = GetEntries(player);
+        if (entries == null || FindEntry(entries, null) == null) return;
+        var prefs = Load(player, player.Slot);
+        change(prefs, Current(prefs, entries));
+        Save(player, prefs);
+        if (apply)
+            ApplySelection(player, prefs, Current(prefs, entries));
+        ShowSettings(player, entries);
+    }
+
+    private void OpenParticles(CCSPlayerController player)
+    {
+        if (!CanEdit(player)) return;
+        var entries = GetEntries(player);
+        if (entries == null || FindEntry(entries, null) == null) return;
+        var current = Current(Load(player, player.Slot), entries)?.Name ?? Off;
         var menu = CreateMenu(GetTranslatedText("playerparticle.Select"));
 
-        menu.AddMenuOption(GetTranslatedText("playerparticle.Disable"), (controller, _) =>
-        {
-            Load(controller).Particle = Off;
-            Save(controller);
-            Remove(controller.Slot);
-            PrintToChat(controller, GetTranslatedText("playerparticle.Off"));
-        }, current == Off);
+        menu.AddMenuOption(GetTranslatedText("playerparticle.Disable"),
+            (controller, _) => SelectParticle(controller, Off), current == Off);
 
         foreach (var entry in entries)
         {
-            menu.AddMenuOption(entry.Name, (controller, _) =>
-            {
-                Load(controller).Particle = entry.Name;
-                Save(controller);
-                Apply(controller);
-                PrintToChat(controller, GetTranslatedText("playerparticle.On", entry.Name));
-            }, current == entry.Name);
+            if (!ValidEntry(entry)) continue;
+            menu.AddMenuOption(entry.Name, (controller, _) => SelectParticle(controller, entry.Name),
+                current == entry.Name);
         }
 
         menu.Open(player);
+    }
+
+    private void SelectParticle(CCSPlayerController player, string name)
+    {
+        if (!CanEdit(player)) return;
+        var entry = name == Off ? null : FindEntry(GetEntries(player), name);
+        if (name != Off && entry == null) return;
+        var prefs = Load(player, player.Slot);
+        prefs.Particle = name;
+        Save(player, prefs);
+        if (entry == null) _spawns.Cancel(player.Slot);
+        ApplySelection(player, prefs, entry);
+        PrintToChat(player, entry == null
+            ? GetTranslatedText("playerparticle.Off")
+            : GetTranslatedText("playerparticle.On", entry.Name));
     }
 
     private string YesNo(bool value) => GetTranslatedText(value ? "playerparticle.Yes" : "playerparticle.No");
@@ -338,9 +442,9 @@ public class PlayerParticle : VipFeatureBase
 
     // ---- settings ---------------------------------------------------------------------------
 
-    private Prefs Load(CCSPlayerController player)
+    private Prefs Load(CCSPlayerController player, int slot)
     {
-        if (_prefs.TryGetValue(player.Slot, out var cached)) return cached;
+        if (_prefs[slot] is { } cached) return cached;
 
         var loaded = new Prefs();
         var raw = GetPlayerCookie<string>(player.SteamID, CookieKey);
@@ -359,35 +463,45 @@ public class PlayerParticle : VipFeatureBase
         if (!Enum.IsDefined(loaded.Mine)) loaded.Mine = MineMode.All;
         if (!Enum.IsDefined(loaded.Others)) loaded.Others = OthersMode.All;
 
-        _prefs[player.Slot] = loaded;
+        _prefs[slot] = loaded;
         return loaded;
     }
 
-    private void Save(CCSPlayerController player) =>
-        SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(Load(player), PrefsJson));
-
-    /// <summary>
-    /// The entry the player picked if the group still offers it, otherwise the first entry of the group
-    /// after an explicit selection. No saved selection means disabled.
-    /// </summary>
-    private PlayerParticleEntry? Current(CCSPlayerController player, List<PlayerParticleEntry> entries)
+    private void Save(CCSPlayerController player, Prefs prefs)
     {
-        var saved = Load(player).Particle;
-        if (string.IsNullOrEmpty(saved) || saved == Off) return null;
-        return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
+        UpdateViewer(player.Slot, player.TeamNum);
+        SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(prefs, PrefsJson));
     }
 
-    private List<PlayerParticleEntry>? TryGetEntries(CCSPlayerController player)
-    {
-        if (!IsClientVip(player) || !PlayerHasFeature(player)) return null;
-        if (GetPlayerFeatureState(player) is not FeatureState.Enabled) return null;
+    private static bool ValidEntry(PlayerParticleEntry? entry) =>
+        entry is { Name.Length: > 0, Particle.Length: > 0 };
 
+    private static PlayerParticleEntry? FindEntry(List<PlayerParticleEntry>? entries, string? name)
+    {
+        if (entries == null) return null;
+        foreach (var entry in entries)
+            if (ValidEntry(entry) && (name == null || entry.Name == name))
+                return entry;
+        return null;
+    }
+
+    private static bool HasSelection(Prefs prefs) =>
+        !string.IsNullOrEmpty(prefs.Particle) && prefs.Particle != Off;
+
+    private static PlayerParticleEntry? Current(Prefs prefs, List<PlayerParticleEntry>? entries) =>
+        HasSelection(prefs) ? FindEntry(entries, prefs.Particle) ?? FindEntry(entries, null) : null;
+
+    private bool CanEdit(CCSPlayerController player) =>
+        !_stopped && player.IsValid && !player.IsBot && ValidSlot(player.Slot) && HasAccess(player);
+
+    private bool HasAccess(CCSPlayerController player) =>
+        IsClientVip(player) && PlayerHasFeature(player) && GetPlayerFeatureState(player) == FeatureState.Enabled;
+
+    private List<PlayerParticleEntry>? GetEntries(CCSPlayerController player)
+    {
         try
         {
-            var entries = GetFeatureValue<List<PlayerParticleEntry>>(player)
-                .Where(e => e.Name.Length > 0 && e.Particle.Length > 0)
-                .ToList();
-            return entries.Count > 0 ? entries : null;
+            return GetFeatureValue<List<PlayerParticleEntry>>(player);
         }
         catch (Exception)
         {
@@ -395,29 +509,86 @@ public class PlayerParticle : VipFeatureBase
         }
     }
 
-    // ---- particle ---------------------------------------------------------------------------
+    private static bool ValidSlot(int slot) => (uint)slot < ParticleVisibility.Slots;
 
-    private void Apply(CCSPlayerController? player)
+    private void QueueSpawn(CCSPlayerController player, int slot)
     {
-        if (_stopped || player is not { IsValid: true } || player.IsBot || player.Slot >= MaxPlayers) return;
+        if (_getPrecached() == null || player.IsBot || !IsClientVip(player))
+        {
+            EndSpawn(slot);
+            return;
+        }
+        var prefs = Load(player, slot);
+        if (!HasSelection(prefs) || !PlayerHasFeature(player) || GetPlayerFeatureState(player) != FeatureState.Enabled)
+        {
+            EndSpawn(slot);
+            return;
+        }
 
-        Remove(player.Slot);
+        var pawn = player.PlayerPawn.Raw;
+        if (_active[slot] is { } active && active.Pawn != pawn)
+            Remove(slot);
+        var controller = player.EntityHandle.Raw;
+        if (!_spawns.TryQueue(slot, pawn, out var request)) return;
+        Server.NextFrame(() =>
+        {
+            if (_stopped || !_spawns.Take(slot, request)) return;
+            if (Utilities.GetPlayerFromSlot(slot) is { IsValid: true } current &&
+                current.EntityHandle.Raw == controller && current.PlayerPawn.Raw == pawn)
+                Apply(current);
+        });
+    }
 
-        // A live load missed this map's precache callback. Wait for the next map
-        // instead of creating entities with resources clients have not received.
-        if (!_resourcesReady()) return;
+    private void EndSpawn(int slot)
+    {
+        if (!ValidSlot(slot)) return;
+        _spawns.Cancel(slot);
+        Remove(slot);
+    }
+
+    private void Apply(CCSPlayerController player, Prefs? prefs = null)
+    {
+        var slot = player.Slot;
+        if (!HasAccess(player))
+        {
+            Remove(slot);
+            return;
+        }
+
+        prefs ??= Load(player, slot);
+        ApplySelection(player, prefs, HasSelection(prefs) ? Current(prefs, GetEntries(player)) : null);
+    }
+
+    private void ApplySelection(CCSPlayerController player, Prefs prefs, PlayerParticleEntry? entry)
+    {
+        var slot = player.Slot;
+        var precached = _getPrecached();
+        if (entry == null || precached == null || !precached.Contains(entry.Particle))
+        {
+            Remove(slot);
+            return;
+        }
 
         var pawn = player.PlayerPawn.Value;
-        if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE) return;
+        if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE)
+        {
+            Remove(slot);
+            return;
+        }
 
-        var entries = TryGetEntries(player);
-        if (entries == null) return;
+        var height = prefs.Height ?? entry.Offset;
+        var pawnHandle = pawn.EntityHandle.Raw;
+        if (_active[slot] is { } active && active.Pawn == pawnHandle && active.Resource == entry.Particle &&
+            active.Height == height)
+            return;
 
-        var entry = Current(player, entries);
+        Remove(slot);
         var origin = pawn.AbsOrigin;
-        if (entry == null || origin == null) return;
+        if (origin == null) return;
 
-        var height = Load(player).Height ?? entry.Offset;
+        if (!_viewersInitialized)
+            InitializeViewers(Utilities.GetPlayers());
+        UpdateViewer(slot, player.TeamNum);
 
         var particle = Utilities.CreateEntityByName<CParticleSystem>("info_particle_system");
         if (particle == null || !particle.IsValid) return;
@@ -429,82 +600,105 @@ public class PlayerParticle : VipFeatureBase
         // Parenting keeps the world position and makes the particle follow the player.
         particle.AcceptInput("SetParent", pawn, pawn, "!activator");
         particle.AcceptInput("Start");
+        if (!particle.IsValid) return;
 
-        _active[player.Slot] = particle;
+        var handle = particle.EntityHandle;
+        _active[slot] = new ActiveParticle(handle.Raw, pawnHandle, entry.Particle, height);
+        _particleOwners.Add(handle.Raw, slot);
+        if (!_deletionRegistered)
+        {
+            _plugin.RegisterListener(_entityDeleted);
+            _deletionRegistered = true;
+        }
+        _visibility.SetParticle(slot, (int)handle.Index);
+        SyncTransmit();
     }
 
     private void RemoveAll()
     {
-        for (var slot = 0; slot < MaxPlayers; slot++)
+        if (_particleOwners.Count == 0) return;
+        for (var slot = 0; slot < _active.Length; slot++)
             Remove(slot);
     }
 
     private void Remove(int slot)
     {
-        if (slot < 0 || slot >= MaxPlayers) return;
+        if (_active[slot] is not { } active) return;
+        ForgetParticle(slot, active.Handle);
+        if (_particleOwners.Count == 0)
+            StopWatchingDeletes();
 
-        var particle = _active[slot];
-        _active[slot] = null;
-
-        if (particle == null || !particle.IsValid || particle.DesignerName != "info_particle_system") return;
+        var particle = new CHandle<CParticleSystem>(active.Handle).Value;
+        if (particle is not { IsValid: true }) return;
 
         particle.AcceptInput("DestroyImmediately");
         if (particle.IsValid) particle.Remove();
     }
 
-    // ---- visibility -------------------------------------------------------------------------
+    private void ForgetParticle(int slot, uint handle)
+    {
+        _active[slot] = null;
+        _particleOwners.Remove(handle);
+        _visibility.SetParticle(slot, 0);
+        SyncTransmit();
+    }
 
-    /// <summary>Strips particles from each viewer's snapshot according to both visibility settings.</summary>
+    private void OnEntityDeleted(CEntityInstance entity)
+    {
+        if (_particleOwners.Count == 0) return;
+        var handle = entity.EntityHandle.Raw;
+        if (!_particleOwners.TryGetValue(handle, out var slot)) return;
+        ForgetParticle(slot, handle);
+        if (_particleOwners.Count == 0)
+        {
+            // Remove the listener outside its own native dispatch.
+            var map = _mapGeneration;
+            Server.NextWorldUpdate(() =>
+            {
+                if (!_stopped && map == _mapGeneration && _particleOwners.Count == 0)
+                    StopWatchingDeletes();
+            });
+        }
+    }
+
+    private void StopWatchingDeletes()
+    {
+        if (!_deletionRegistered) return;
+        _plugin.RemoveListener(_entityDeleted);
+        _deletionRegistered = false;
+    }
+
+    private void UpdateViewer(int slot, int team)
+    {
+        if (!_viewersInitialized) return;
+        var prefs = _prefs[slot];
+        _visibility.SetViewer(slot, true, team, prefs?.Mine ?? MineMode.All, prefs?.Others ?? OthersMode.All,
+            prefs?.SeeOwn ?? true);
+        SyncTransmit();
+    }
+
+    private void SyncTransmit()
+    {
+        var needed = !_stopped && _visibility.NeedsFilter;
+        if (needed == _transmitRegistered) return;
+        if (needed) _plugin.RegisterListener(_checkTransmit);
+        else _plugin.RemoveListener(_checkTransmit);
+        _transmitRegistered = needed;
+    }
+
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
-        if (_stopped) return;
-
-        var any = false;
-        foreach (var particle in _active)
-            if (particle != null) { any = true; break; }
-        if (!any) return;
-
-        Array.Clear(_team);
-        foreach (var player in Utilities.GetPlayers())
-            if (player.Slot < MaxPlayers)
-                _team[player.Slot] = player.TeamNum;
-
-        foreach (var (info, viewer) in infoList)
+        var count = infoList.Count;
+        for (var i = 0; i < count; i++)
         {
-            if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
+            var (info, viewer) = infoList[i];
+            if (viewer is not { IsValid: true }) continue;
+            var slot = viewer.Slot;
+            if (!ValidSlot(slot)) continue;
 
-            var viewerPrefs = _prefs.GetValueOrDefault(viewer.Slot);
-            for (var owner = 0; owner < MaxPlayers; owner++)
-            {
-                var particle = _active[owner];
-                if (particle == null || !particle.IsValid) continue;
-
-                var ownerPrefs = _prefs.GetValueOrDefault(owner);
-                if (owner == viewer.Slot)
-                {
-                    if (ownerPrefs is { SeeOwn: false })
-                        info.TransmitEntities.Remove((int)particle.Index);
-                    continue;
-                }
-
-                var sameTeam = _team[owner] > 1 && _team[owner] == _team[viewer.Slot];
-
-                var ownerAllows = ownerPrefs?.Mine switch
-                {
-                    MineMode.Team => sameTeam,
-                    MineMode.Self => false,
-                    _ => true
-                };
-                var viewerAllows = viewerPrefs?.Others switch
-                {
-                    OthersMode.Team => sameTeam,
-                    OthersMode.None => false,
-                    _ => true
-                };
-
-                if (!ownerAllows || !viewerAllows)
-                    info.TransmitEntities.Remove((int)particle.Index);
-            }
+            var hidden = _visibility.Hidden(slot);
+            while (hidden != 0)
+                info.TransmitEntities.Remove(_visibility.EntityIndex(ParticleVisibility.PopSlot(ref hidden)));
         }
     }
 }
