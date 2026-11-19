@@ -16,7 +16,7 @@ public class VipPlayerTrail : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Trail";
-    public override string ModuleVersion => "1.1.0";
+    public override string ModuleVersion => "1.1.1";
     public override string ModuleDescription => "Draws a beam or particle trail behind VIP players";
 
     private bool _unloaded;
@@ -48,6 +48,7 @@ public class VipPlayerTrail : BasePlugin
         if (_api == null || _trail != null) return;
         _trail = new PlayerTrail(this, _api);
         _api.RegisterFeature(_trail, FeatureType.Selectable);
+        _trail.RestorePlayers();
     }
 
     public override void Unload(bool hotReload)
@@ -87,6 +88,7 @@ public class VipPlayerTrail : BasePlugin
             {
                 if (!group.Value.TryGetProperty("Values", out var values) ||
                     !values.TryGetProperty(PlayerTrail.FeatureName, out var trail) ||
+                    trail.ValueKind != JsonValueKind.Object ||
                     !trail.TryGetProperty("Particles", out var particles) ||
                     particles.ValueKind != JsonValueKind.Array)
                     continue;
@@ -152,6 +154,7 @@ public class PlayerTrail : VipFeatureBase
         public CParticleSystem? Carried;
         public Vector3 Last;
         public bool HasLast;
+        public double RetryCarryAt;
     }
 
     public override string Feature => FeatureName;
@@ -226,6 +229,7 @@ public class PlayerTrail : VipFeatureBase
             var slot = player.Slot;
             CancelSpawn(slot);
             _visibility.SetTeam(slot, player.TeamNum);
+            if (player.IsBot || !IsClientVip(player)) return HookResult.Continue;
             var generation = _spawnGeneration[slot];
             Server.NextFrame(() =>
             {
@@ -233,15 +237,17 @@ public class PlayerTrail : VipFeatureBase
             });
             return HookResult.Continue;
         });
+    }
 
+    internal void RestorePlayers()
+    {
         // Module loaded on a live server: pick up VIPs already in game.
         foreach (var player in Utilities.GetPlayers())
         {
             if (!ValidSlot(player.Slot)) continue;
             _visibility.SetTeam(player.Slot, player.TeamNum);
             if (player.IsBot || !IsClientVip(player)) continue;
-            LoadSelection(player);
-            Apply(player);
+            RestorePlayer(player);
         }
     }
 
@@ -255,16 +261,32 @@ public class PlayerTrail : VipFeatureBase
     }
 
     public override void OnPlayerLoaded(CCSPlayerController player, string group)
+        => RestorePlayer(player);
+
+    private void RestorePlayer(CCSPlayerController player)
     {
-        if (_stopped || !ValidSlot(player.Slot)) return;
+        if (_stopped || !player.IsValid || !ValidSlot(player.Slot)) return;
+        if (!IsClientVip(player) || !PlayerHasFeature(player))
+        {
+            ClearAccess(player.Slot);
+            return;
+        }
         LoadSelection(player);
         Apply(player);
     }
 
     public override void OnPlayerRemoved(CCSPlayerController player, string group)
     {
-        if (_stopped) return;
-        Remove(player.Slot);
+        if (_stopped || !player.IsValid || !ValidSlot(player.Slot)) return;
+        ClearAccess(player.Slot);
+    }
+
+    private void ClearAccess(int slot)
+    {
+        _spawnGeneration[slot]++;
+        Remove(slot, destroyCarried: false);
+        RemoveOwnedEffects(slot);
+        _visibility.SetPreferences(slot, MineMode.All, OthersMode.All);
     }
 
     public override void OnSelectItem(CCSPlayerController player, FeatureState state)
@@ -283,6 +305,7 @@ public class PlayerTrail : VipFeatureBase
         menu.AddMenuOption(GetTranslatedText("playertrail.Others", GetTranslatedText($"playertrail.others.{others}")),
             (controller, _) =>
             {
+                if (!CanEdit(controller)) return;
                 var next = (OthersMode)(((int)others + 1) % 3);
                 _visibility.SetPreferences(controller.Slot, _visibility.Mine(controller.Slot), next);
                 SetPlayerCookie(controller.SteamID, OthersCookieKey, (int)next);
@@ -293,6 +316,7 @@ public class PlayerTrail : VipFeatureBase
         menu.AddMenuOption(GetTranslatedText("playertrail.Mine", GetTranslatedText($"playertrail.mine.{mine}")),
             (controller, _) =>
             {
+                if (!CanEdit(controller)) return;
                 var next = (MineMode)(((int)mine + 1) % 3);
                 _visibility.SetPreferences(controller.Slot, next, _visibility.Others(controller.Slot));
                 SetPlayerCookie(controller.SteamID, MineCookieKey, (int)next);
@@ -301,6 +325,7 @@ public class PlayerTrail : VipFeatureBase
 
         menu.AddMenuOption(GetTranslatedText("playertrail.Disable"), (controller, _) =>
         {
+            if (!CanEdit(controller)) return;
             Select(controller, Off);
             PrintToChat(controller, GetTranslatedText("playertrail.Off"));
         }, current == Off);
@@ -309,6 +334,7 @@ public class PlayerTrail : VipFeatureBase
         {
             menu.AddMenuOption(name, (controller, _) =>
             {
+                if (!CanEdit(controller)) return;
                 Select(controller, value);
                 PrintToChat(controller, GetTranslatedText("playertrail.On", name));
             }, current.Equals(value, StringComparison.OrdinalIgnoreCase));
@@ -316,6 +342,11 @@ public class PlayerTrail : VipFeatureBase
 
         menu.Open(player);
     }
+
+    // A menu can still be open when the module unloads or the player loses access.
+    private bool CanEdit(CCSPlayerController player) =>
+        !_stopped && player.IsValid && ValidSlot(player.Slot) && IsClientVip(player) && PlayerHasFeature(player) &&
+        GetPlayerFeatureState(player) != FeatureState.NoAccess;
 
     private void Select(CCSPlayerController player, string value)
     {
@@ -365,13 +396,7 @@ public class PlayerTrail : VipFeatureBase
     /// </summary>
     private string CurrentValue(CCSPlayerController player, List<(string Name, string Value)> options)
     {
-        var saved = _selected[player.Slot];
-
-        if (saved == Off) return Off;
-        if (saved != null && options.Any(o => o.Value.Equals(saved, StringComparison.OrdinalIgnoreCase)))
-            return saved;
-
-        return options.Count > 0 ? options[0].Value : Off;
+        return TrailSelection.Resolve(_selected[player.Slot], options);
     }
 
     private TrailConfig? TryGetConfig(CCSPlayerController player)
@@ -398,7 +423,11 @@ public class PlayerTrail : VipFeatureBase
         var pawn = player.PlayerPawn.Value;
         if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE) return;
         var cfg = TryGetConfig(player);
-        if (cfg == null) return;
+        if (cfg == null)
+        {
+            _visibility.SetPreferences(slot, MineMode.All, OthersMode.All);
+            return;
+        }
         var value = CurrentValue(player, Options(cfg));
         if (value == Off) return;
 
@@ -420,7 +449,7 @@ public class PlayerTrail : VipFeatureBase
             {
                 state.Last = (Vector3)abs;
                 state.Carried = Carry(slot, state, state.Last);
-                state.HasLast = state.Carried is not null;
+                if (state.Carried == null) state.RetryCarryAt = Server.TickedTime + 1;
             }
         }
         else if (value.Equals("random", StringComparison.OrdinalIgnoreCase))
@@ -509,16 +538,19 @@ public class PlayerTrail : VipFeatureBase
             }
 
             var origin = (Vector3)abs;
-            if (state.Carried is { } carried)
+            if (state.Particle is { Follow: true } follow)
             {
-                if (!carried.IsValid)
+                if (state.Carried is not { IsValid: true } carried)
                 {
-                    state.Carried = null;
-                    state.HasLast = false;
+                    var time = now ??= Server.TickedTime;
+                    if (time < state.RetryCarryAt) continue;
+                    state.Carried = Carry(slot, state, origin);
+                    state.RetryCarryAt = time + 1;
+                    state.Last = origin;
                 }
                 else if (origin != state.Last)
                 {
-                    carried.Teleport(WithOffset(origin, state.Particle!.Offset), Vector3.Zero, Vector3.Zero);
+                    carried.Teleport(WithOffset(origin, follow.Offset), Vector3.Zero, Vector3.Zero);
                     state.Last = origin;
                 }
                 continue;

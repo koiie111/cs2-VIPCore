@@ -176,26 +176,37 @@ public class VipCore : BasePlugin
             var userFromDb = await Database.GetUserFromDb(steamId.AccountId);
             if (userFromDb == null) return;
 
-            Users.Remove(steamId.SteamId64, out _);
-            foreach (var user in userFromDb.OfType<User>().Where(user => user.sid == CoreConfig.ServerId))
+            var user = userFromDb.OfType<User>().FirstOrDefault(u => u.sid == CoreConfig.ServerId);
+            await Server.NextFrameAsync(() =>
             {
-                Users.TryAdd(steamId.SteamId64, user);
-                SetClientFeature(steamId.SteamId64, user.group);
-
-                var timeRemaining = DateTimeOffset.FromUnixTimeSeconds(user.expires);
-
-                await Server.NextFrameAsync(() =>
+                if (!player.IsValid || player.AuthorizedSteamID?.SteamId64 != steamId.SteamId64) return;
+                if (user == null)
                 {
-                    VipApi.OnPlayerLoaded(player, user.group);
-                    IsClientVip[player.Slot] = IsUserActiveVip(player);
+                    IsClientVip[player.Slot] = false;
+                    if (Users.TryRemove(steamId.SteamId64, out var previous))
+                        VipApi.OnPlayerRemoved(player, previous.group);
+                    return;
+                }
 
-                    AddTimer(5.0f, () => PrintToChat(player,
-                        Localizer["vip.WelcomeToTheServer", user.name] + (user.expires == 0
+                Users[steamId.SteamId64] = user;
+                SetClientFeature(steamId.SteamId64, user.group);
+                IsClientVip[player.Slot] = IsUserActiveVip(player);
+                if (!IsClientVip[player.Slot])
+                {
+                    VipApi.OnPlayerRemoved(player, user.group);
+                    return;
+                }
+
+                VipApi.OnPlayerLoaded(player, user.group);
+                var timeRemaining = DateTimeOffset.FromUnixTimeSeconds(user.expires);
+                AddTimer(5.0f, () =>
+                {
+                    if (player.IsValid && player.AuthorizedSteamID?.SteamId64 == steamId.SteamId64)
+                        PrintToChat(player, Localizer["vip.WelcomeToTheServer", user.name] + (user.expires == 0
                             ? string.Empty
-                            : Localizer["vip.Expires", user.group, timeRemaining.ToString("G")])));
+                            : Localizer["vip.Expires", user.group, timeRemaining.ToString("G")]));
                 });
-                return;
-            }
+            });
         }
         catch (Exception e)
         {
@@ -210,16 +221,16 @@ public class VipCore : BasePlugin
 
         foreach (var (key, _) in Features)
         {
-            if (!group.Values.TryGetValue(key, out _))
-            {
-                user.FeatureState[key] = FeatureState.NoAccess;
-                continue;
-            }
-
-            var cookie = VipApi.GetPlayerCookie<int>(steamId, key);
-            var cookieValue = cookie == 2 ? 0 : cookie;
-            user.FeatureState[key] = (FeatureState)cookieValue;
+            user.FeatureState[key] = InitialFeatureState(steamId, group, key);
         }
+    }
+
+    internal FeatureState InitialFeatureState(ulong steamId, VipGroup? group, string key)
+    {
+        if (group == null || !group.Values.TryGetValue(key, out var value) || string.IsNullOrEmpty(value?.ToString()))
+            return FeatureState.NoAccess;
+        var cookie = VipApi.GetPlayerCookie<int>(steamId, key);
+        return cookie == 2 ? FeatureState.Enabled : (FeatureState)cookie;
     }
 
     public User CreateNewUser(int accountId, string username, string group, int endTime)
@@ -356,7 +367,13 @@ public class VipCore : BasePlugin
         {
             if (!Users.TryGetValue(player.SteamID, out var user)) return;
 
-            user.group = vipGroup;
+            if (time >= 0) user.expires = time == 0 ? 0 : CalculateEndTimeInSeconds(time);
+            if (vipGroup.Length > 0 && vipGroup != user.group)
+            {
+                user.group = vipGroup;
+                SetClientFeature(player.SteamID, vipGroup);
+                VipApi.OnPlayerLoaded(player, vipGroup);
+            }
         }
 
         Task.Run(() => Database.UpdateUserVip(accountId, group: vipGroup, time: time));

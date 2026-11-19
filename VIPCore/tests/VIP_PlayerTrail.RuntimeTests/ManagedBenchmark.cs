@@ -77,6 +77,8 @@ internal static class ManagedBenchmark
             else baselineOwners[slot].Add(index);
         }
 
+        UInt128 activeMask = 0;
+        for (var slot = 0; slot < active; slot++) activeMask |= TrailVisibility.Bit(slot);
         long result = 0;
         uint nextIndex = 100;
         for (var tick = 1; tick <= Ticks; tick++)
@@ -98,9 +100,12 @@ internal static class ManagedBenchmark
 
             if (tick % 2 == 0)
             {
-                var slots = optimized ? active : TrailVisibility.Slots;
-                for (var slot = 0; slot < slots; slot++)
+                var owners = activeMask;
+                var nextSlot = 0;
+                while (optimized ? owners != 0 : nextSlot < TrailVisibility.Slots)
                 {
+                    var slot = optimized ? (int)UInt128.TrailingZeroCount(owners) : nextSlot++;
+                    if (optimized) owners &= owners - 1;
                     if (slot >= active) continue;
                     var position = follow ? Vector3.One : new Vector3(tick * 5, slot, 0);
                     if (follow)
@@ -147,7 +152,7 @@ internal static class ManagedBenchmark
                     {
                         var owner = (int)UInt128.TrailingZeroCount(hidden);
                         hidden &= hidden - 1;
-                        result += tracked.Indices(owner)!.Count;
+                        foreach (var index in tracked.Indices(owner)!) result += index;
                     }
                 }
             }
@@ -163,7 +168,8 @@ internal static class ManagedBenchmark
                 for (var owner = 0; owner < TrailVisibility.Slots; owner++)
                 {
                     if (baselineOwners[owner] is not { Count: > 0 } indices || owner == viewer) continue;
-                    if (roster[owner] != roster[viewer]) result += indices.Count;
+                    if (roster[owner] != roster[viewer])
+                        foreach (var index in indices) result += index;
                 }
             }
         }

@@ -23,16 +23,27 @@ internal static class FeatureReloadTests
         var api = (VIPCore.VipCoreApi)RuntimeHelpers.GetUninitializedObject(typeof(VIPCore.VipCoreApi));
         typeof(VIPCore.VipCoreApi).GetField("_vipCore", System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.NonPublic)!.SetValue(api, core);
+        typeof(VipCore).GetField(nameof(VipCore.Users))!
+            .SetValue(core, new ConcurrentDictionary<ulong, User>());
+        typeof(VIPCore.VipCoreApi).GetField("_playersCookie", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)!.SetValue(api, new Dictionary<ulong, PlayerCookie>());
+        core.VipApi = api;
+        core.Users[1] = new User { name = "online", group = "VIP" };
+        core.Users[2] = new User { name = "other", group = "NoTrail" };
         var previous = new TestTrail(api);
         api.RegisterFeature(previous, FeatureType.Selectable);
+        Require(core.Users[1].FeatureState["PlayerTrail"] == FeatureState.Enabled, "Live registration for online VIP");
+        Require(core.Users[2].FeatureState["PlayerTrail"] == FeatureState.NoAccess, "Unconfigured group has no access");
         var configured = Values(core);
         api.UnRegisterFeature(previous);
 
         Require(!core.Features.ContainsKey("PlayerTrail"), "Unload removes the menu handler");
         Require(Values(core).SequenceEqual(configured), "Unload preserves each group's settings");
 
+        Require(!api.GetAllRegisteredFeatures().Any(f => f.feature == "PlayerTrail"), "Unloaded feature is hidden");
         var replacement = new TestTrail(api);
         api.RegisterFeature(replacement, FeatureType.Selectable);
+        api.UnRegisterFeature(previous);
         Require(ReferenceEquals(core.Features["PlayerTrail"].OnSelectItem?.Target, replacement),
             "Reload registers the new menu handler");
         Require(Values(core).SequenceEqual(configured), "Reload reuses configured values without a config reload");

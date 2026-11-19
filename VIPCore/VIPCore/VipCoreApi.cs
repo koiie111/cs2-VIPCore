@@ -50,20 +50,22 @@ public class VipCoreApi : IVipCoreApi
 
     public void RegisterFeature(VipFeatureBase vipFeatureBase, FeatureType featureType = FeatureType.Toggle)
     {
-        foreach (var config in _vipCore.Config.Groups)
-        {
-            if (vipFeatureBase.Feature == null || string.IsNullOrEmpty(vipFeatureBase.Feature)) continue;
-            config.Value.Values.TryAdd(vipFeatureBase.Feature, string.Empty);
-            foreach (var keyValuePair in config.Value.Values)
-            {
-                if (string.IsNullOrEmpty(keyValuePair.Value.ToString())) continue;
+        var key = vipFeatureBase.Feature;
+        if (string.IsNullOrEmpty(key)) return;
+        foreach (var group in _vipCore.Config.Groups.Values)
+            group.Values.TryAdd(key, string.Empty);
 
-                _vipCore.Features.TryAdd(vipFeatureBase.Feature, new Feature
-                {
-                    FeatureType = featureType,
-                    OnSelectItem = vipFeatureBase.OnSelectItem
-                });
-            }
+        if (!_vipCore.Features.TryAdd(key, new Feature
+            {
+                FeatureType = featureType,
+                OnSelectItem = vipFeatureBase.OnSelectItem
+            })) return;
+
+        foreach (var (steamId, user) in _vipCore.Users)
+        {
+            if (user.FeatureState.ContainsKey(key)) continue;
+            var group = _vipCore.Config.Groups.GetValueOrDefault(user.group);
+            user.FeatureState[key] = _vipCore.InitialFeatureState(steamId, group, key);
         }
 
         _vipCore.PrintLogInfo("Feature '{feature}' registered successfully", vipFeatureBase.Feature);
@@ -72,7 +74,10 @@ public class VipCoreApi : IVipCoreApi
     public void UnRegisterFeature(VipFeatureBase vipFeatureBase)
     {
         // Group values belong to vip.json and are needed when the module registers again.
-        _vipCore.Features.TryRemove(vipFeatureBase.Feature, out _);
+        var key = vipFeatureBase.Feature;
+        if (!_vipCore.Features.TryGetValue(key, out var registered) ||
+            registered.OnSelectItem != vipFeatureBase.OnSelectItem ||
+            !_vipCore.Features.TryRemove(new KeyValuePair<string, Feature>(key, registered))) return;
 
         _vipCore.PrintLogInfo(
             "Feature '{feature}' unregistered successfully", vipFeatureBase.Feature);
@@ -84,7 +89,7 @@ public class VipCoreApi : IVipCoreApi
         {
             foreach (var (key, value) in config.Value.Values)
             {
-                yield return (key, value);
+                if (_vipCore.Features.ContainsKey(key)) yield return (key, value);
             }
         }
     }
@@ -166,13 +171,13 @@ public class VipCoreApi : IVipCoreApi
 
         Task.Run(() => _vipCore.Database.UpdateUserVip(steamId.AccountId, name, group, time));
 
-        var user = _vipCore.CreateNewUser(steamId.AccountId, name, group, time);
-        if (!_vipCore.Users.TryAdd(steamId.SteamId64, user))
-        {
-            _vipCore.Users[steamId.SteamId64] = user;
-        }
-
-        OnPlayerLoaded(player, group);
+        var user = _vipCore.Users.GetOrAdd(steamId.SteamId64, _ =>
+            _vipCore.CreateNewUser(steamId.AccountId, name, group, time));
+        if (name.Length > 0) user.name = name;
+        if (group.Length > 0) user.group = group;
+        if (time >= 0) user.expires = time == 0 ? 0 : _vipCore.CalculateEndTimeInSeconds(time);
+        _vipCore.SetClientFeature(steamId.SteamId64, user.group);
+        OnPlayerLoaded(player, user.group);
     }
 
     public void SetClientVip(CCSPlayerController player, string group, int time)
@@ -189,11 +194,10 @@ public class VipCoreApi : IVipCoreApi
         var accountId = authSteamId.AccountId;
         var steamId64 = authSteamId.SteamId64;
 
-        OnPlayerLoaded(player, group);
-        Task.Run(() => SetClientVipAsync(name, accountId, group, time, steamId64));
+        Task.Run(() => SetClientVipAsync(player, name, accountId, group, time, steamId64));
     }
 
-    private async Task SetClientVipAsync(string name, int accountId, string group, int time,
+    private async Task SetClientVipAsync(CCSPlayerController player, string name, int accountId, string group, int time,
         ulong steamId64)
     {
         try
@@ -201,10 +205,14 @@ public class VipCoreApi : IVipCoreApi
             var user = _vipCore.CreateNewUser(accountId, name, group, time);
             await _vipCore.Database.UpdateUserInDb(user);
 
-            if (_vipCore.Users.ContainsKey(steamId64))
+            await Server.NextFrameAsync(() =>
             {
+                if (!player.IsValid || player.AuthorizedSteamID?.SteamId64 != steamId64 ||
+                    !_vipCore.Users.ContainsKey(steamId64)) return;
                 _vipCore.Users[steamId64] = user;
-            }
+                _vipCore.SetClientFeature(steamId64, group);
+                OnPlayerLoaded(player, group);
+            });
         }
         catch (Exception e)
         {
@@ -239,12 +247,11 @@ public class VipCoreApi : IVipCoreApi
         var accountId = authSteamId.AccountId;
         var steamId64 = authSteamId.SteamId64;
 
-        OnPlayerLoaded(player, group);
-
         var user = _vipCore.CreateNewUser(accountId, name, group, time);
         _vipCore.Users.TryAdd(steamId64, user);
         _vipCore.SetClientFeature(steamId64, group);
         _vipCore.IsClientVip[player.Slot] = true;
+        OnPlayerLoaded(player, group);
 
         if (!isTemporary)
         {
