@@ -96,6 +96,21 @@ internal static class RuntimeChecks
         plugin.Timers.Last().Fire();
         Expect(!volume.Master && volume.RemovalRequested, "revoked CSS group");
         DeleteRetiring(plugin);
+
+        api.Required = "";
+        plugin.Fire(new EventPlayerSpawn { Userid = owner });
+        Server.Advance();
+        volume = Personal().Single();
+        Expect(volume.Master, "unrestricted selected effect is active before reload");
+        api.ReloadConfig();
+        Expect(volume.Master && !volume.RemovalRequested, "reload preserves an effect that is still available");
+        api.Required = "#css/vip";
+        api.ReloadConfig();
+        Expect(api.Access && !volume.Master && volume.RemovalRequested, "reload removes a newly restricted effect immediately");
+        Expect(api.Cookies[owner.SteamID] == """{"p":"Warm"}""", "reload preserves the saved effect choice");
+        CheckSnapshot(owner, false, "newly restricted effect is hidden pending deletion");
+        DeleteRetiring(plugin);
+
         AdminManager.GroupMember = true;
         plugin.Fire(new EventPlayerSpawn { Userid = owner });
         Server.Advance();

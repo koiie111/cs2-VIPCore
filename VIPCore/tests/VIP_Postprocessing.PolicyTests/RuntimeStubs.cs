@@ -202,14 +202,16 @@ namespace Microsoft.Extensions.Logging
 }
 namespace VipCoreApi
 {
-    public class IVipCoreApi
+    public class IVipCoreApi : IVipConfigReloadApi
     {
         public enum FeatureType { Selectable }
         public enum FeatureState { Enabled, Disabled }
         public event Action? OnCoreReady;
+        public event Action? ConfigReloaded;
         public event Action<CCSPlayerController>? OnPlayerSpawn;
         public event Action<CCSPlayerController, string>? PlayerLoaded, PlayerRemoved;
         public void Ready() => OnCoreReady?.Invoke();
+        public void ReloadConfig() => ConfigReloaded?.Invoke();
         public void Spawn(CCSPlayerController p) => OnPlayerSpawn?.Invoke(p);
         public void Loaded(CCSPlayerController p) => PlayerLoaded?.Invoke(p, "vip");
         public void Removed(CCSPlayerController p) => PlayerRemoved?.Invoke(p, "vip");

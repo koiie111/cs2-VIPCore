@@ -11,10 +11,7 @@
     <PackageReference Include="CounterStrikeSharp.API" Version="1.0.378" />
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="VipCoreApi">
-      <HintPath>..\..\VipCoreApi.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+    <ProjectReference Include="../../VipCoreApi/VipCoreApi.csproj" Private="false" />
   </ItemGroup>
 
   <Target Name="CopyAutoLoadEntryPoint" AfterTargets="Build">

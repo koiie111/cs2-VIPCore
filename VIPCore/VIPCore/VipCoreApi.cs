@@ -11,7 +11,7 @@ using static VipCoreApi.IVipCoreApi;
 
 namespace VIPCore;
 
-public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
+public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi, IVipConfigReloadApi
 {
     private readonly VipCore _vipCore;
     private Dictionary<ulong, PlayerCookie> _playersCookie = [];
@@ -20,6 +20,7 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
     public event Action<CCSPlayerController, string>? PlayerLoaded;
     public event Action<CCSPlayerController, string>? PlayerRemoved;
     public event Action? OnCoreReady;
+    public event Action? ConfigReloaded;
     public event Action<CCSPlayerController, string, FeatureState>? PlayerFeatureStateSet;
     public event Func<CCSPlayerController, string, FeatureState, FeatureType, HookResult?>? OnPlayerUseFeature;
 
@@ -43,6 +44,8 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
     {
         OnCoreReady?.Invoke();
     }
+
+    internal void NotifyConfigReloaded() => ConfigReloaded?.Invoke();
 
     public int GetServerId()
     {

@@ -192,6 +192,7 @@ public class Postprocessing : VipFeatureBase
     private readonly PostprocessingEntry?[] _activeEntries = new PostprocessingEntry?[MaxPlayers];
     private readonly long[] _pendingApply = new long[MaxPlayers];
     private readonly BasePlugin _plugin;
+    private readonly IVipConfigReloadApi? _configReloadApi;
     private bool _mapRunning;
     private int _mapGeneration;
     private long _applySequence;
@@ -204,6 +205,8 @@ public class Postprocessing : VipFeatureBase
     public Postprocessing(BasePlugin plugin, IVipCoreApi api, bool mapRunning) : base(api)
     {
         _plugin = plugin;
+        _configReloadApi = api as IVipConfigReloadApi;
+        if (_configReloadApi != null) _configReloadApi.ConfigReloaded += OnConfigReloaded;
         _mapRunning = mapRunning;
         plugin.AddTimer(2f, () =>
         {
@@ -318,6 +321,7 @@ public class Postprocessing : VipFeatureBase
     public void Stop()
     {
         _stopped = true;
+        if (_configReloadApi != null) _configReloadApi.ConfigReloaded -= OnConfigReloaded;
         Api.OnPlayerSpawn -= OnPlayerSpawn;
         Api.PlayerLoaded -= OnPlayerLoaded;
         Api.PlayerRemoved -= OnPlayerRemoved;
@@ -330,6 +334,25 @@ public class Postprocessing : VipFeatureBase
         }
 
         ResetMap();
+    }
+
+    private void OnConfigReloaded()
+    {
+        var active = _volumes.Active;
+        while (active != 0)
+        {
+            var slot = VolumeVisibility.TakeSlot(ref active);
+            var player = Utilities.GetPlayerFromSlot(slot);
+            if (player is not { IsValid: true } || !CanUseFeature(player) ||
+                FindEffect(player, _activeEntries[slot]?.Name) is not { } entry)
+            {
+                ClearPlayer(slot);
+                continue;
+            }
+
+            // Subsequent permission checks must use the restrictions from the reloaded entry.
+            _activeEntries[slot] = entry;
+        }
     }
 
     public override void OnPlayerLoaded(CCSPlayerController player, string group)
@@ -536,6 +559,17 @@ public class Postprocessing : VipFeatureBase
         return entries is { Count: > 0 } ? entries : null;
     }
 
+    private PostprocessingEntry? FindEffect(CCSPlayerController player, string? name)
+    {
+        if (!PostprocessingPolicy.HasExplicitEffect(name)) return null;
+        var entries = ReadEntries(player);
+        if (entries == null) return null;
+        foreach (var entry in entries)
+            if (entry?.Name == name && Usable(player, entry))
+                return entry;
+        return null;
+    }
+
     private static bool Usable(CCSPlayerController player, PostprocessingEntry? entry) =>
         entry != null && !string.IsNullOrEmpty(entry.Name) && !string.IsNullOrEmpty(entry.File) && Allowed(player, entry);
 
@@ -572,16 +606,7 @@ public class Postprocessing : VipFeatureBase
             !CanUseFeature(player)) return;
 
         var prefs = Load(player);
-        if (!PostprocessingPolicy.HasExplicitEffect(prefs.Effect)) return;
-        var entries = ReadEntries(player);
-        if (entries == null) return;
-        PostprocessingEntry? entry = null;
-        foreach (var candidate in entries)
-        {
-            if (candidate?.Name != prefs.Effect || !Usable(player, candidate)) continue;
-            entry = candidate;
-            break;
-        }
+        var entry = FindEffect(player, prefs.Effect);
         if (entry == null || pawn.AbsOrigin is not { } origin) return;
         var exposure = ExposureSteps[prefs.ExposureStep];
 
