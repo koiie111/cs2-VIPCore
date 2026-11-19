@@ -17,7 +17,8 @@ namespace CounterStrikeSharp.API
 
     internal static class Utilities
     {
-        public static readonly CCSPlayerController?[] Players = new CCSPlayerController?[64];
+        public static readonly CCSPlayerController?[] Players = new CCSPlayerController?[65];
+        public static int MaxPlayers = 65;
         public static int Visits;
         public static CCSPlayerController? GetPlayerFromSlot(int slot)
         {
@@ -28,7 +29,7 @@ namespace CounterStrikeSharp.API
         public static List<CCSPlayerController> GetPlayers()
         {
             var players = new List<CCSPlayerController>();
-            for (var slot = 0; slot < Players.Length; slot++)
+            for (var slot = 0; slot < MaxPlayers; slot++)
                 if (GetPlayerFromSlot(slot) is { IsValid: true, Connected: PlayerConnectedState.Connected } player)
                     players.Add(player);
             return players;
@@ -44,7 +45,13 @@ namespace CounterStrikeSharp.API.Core
     {
         public int Slot { get; init; }
         public bool IsValid = true;
-        public bool PawnIsAlive = true;
+        public static int AliveChecks;
+        private bool _alive = true;
+        public bool PawnIsAlive
+        {
+            get { AliveChecks++; return _alive; }
+            set => _alive = value;
+        }
         public bool IsBot;
         public bool IsHLTV;
         public PlayerConnectedState Connected;
@@ -80,6 +87,15 @@ namespace CounterStrikeSharp.API.Core
         public virtual void OnAllPluginsLoaded(bool hotReload) { }
         public virtual void Unload(bool hotReload) { }
         public void RegisterListener<T>(T listener) where T : Delegate => _listeners.Add(typeof(T), listener);
+        public void RemoveListener<T>(T listener) where T : Delegate
+        {
+            if (!Equals(_listeners[typeof(T)], listener)) throw new InvalidOperationException("Wrong listener");
+            _listeners.Remove(typeof(T));
+        }
+        public T? FindListener<T>() where T : Delegate => _listeners.GetValueOrDefault(typeof(T)) as T;
+        public Modules.Timers.Timer? RetryTimer;
+        public Modules.Timers.Timer AddTimer(float interval, Action callback, Modules.Timers.TimerFlags flags) =>
+            RetryTimer = new(callback);
         public T Listener<T>() where T : Delegate => (T)_listeners[typeof(T)];
     }
 }
@@ -89,7 +105,7 @@ namespace CounterStrikeSharp.API.Core.Capabilities
     internal sealed class PluginCapability<T>(string name) where T : class
     {
         public static T? Value;
-        public T? Get() => name == "vipcore:core" ? Value : null;
+        public T? Get() => name == "vipcore:core" && Value != null ? Value : throw new KeyNotFoundException();
     }
 }
 
@@ -131,5 +147,16 @@ namespace VipCoreApi
         protected FeatureState GetPlayerFeatureState(CCSPlayerController player) => Api.GetPlayerFeatureState(player);
         protected bool IsClientVip(CCSPlayerController player) => Api.IsClientVip(player);
         protected bool PlayerHasFeature(CCSPlayerController player) => Api.PlayerHasFeature(player);
+    }
+}
+
+namespace CounterStrikeSharp.API.Modules.Timers
+{
+    public enum TimerFlags { REPEAT }
+    public sealed class Timer(Action callback)
+    {
+        public bool Killed;
+        public void Kill() => Killed = true;
+        public void Fire() { if (!Killed) callback(); }
     }
 }

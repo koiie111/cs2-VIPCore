@@ -9,6 +9,13 @@ internal static class FeatureReloadTests
 {
     internal static void Run()
     {
+        var group = JsonSerializer.Deserialize<VipGroup>(
+            """{"Values":{"zero":0,"off":false,"object":{},"array":[],"empty":"","text":"on","null":null}}""")!;
+        foreach (var key in new[] { "zero", "off", "object", "array", "text" })
+            Require(group.HasFeature(key), $"Configured value for {key}");
+        foreach (var key in new[] { "empty", "null", "missing" })
+            Require(!group.HasFeature(key), $"No access for {key}");
+
         // BasePlugin normally registers native listeners. This test only needs the core's managed state.
         var core = (VipCore)RuntimeHelpers.GetUninitializedObject(typeof(VipCore));
         typeof(VipCore).GetField(nameof(VipCore.Features))!
@@ -49,6 +56,22 @@ internal static class FeatureReloadTests
         Require(Values(core).SequenceEqual(configured), "Reload reuses configured values without a config reload");
         Require(string.IsNullOrEmpty(core.Config.Groups["NoTrail"].Values["PlayerTrail"].ToString()),
             "Reload does not grant the feature to an unconfigured group");
+
+        var user = core.Users[1];
+        var toggle = new TestToggle(api);
+        api.RegisterFeature(toggle);
+        var configuredGroup = core.Config;
+        var withoutToggle = new Config();
+        configuredGroup.Groups["VIP"].Values[toggle.Feature] = 1;
+        user.FeatureState[toggle.Feature] = FeatureState.Disabled;
+        void Apply(string key, FeatureState state) => user.FeatureState[key] = state;
+        core.Config = withoutToggle;
+        core.RefreshGroupAccess(1, user, configuredGroup, Apply);
+        Require(user.FeatureState[toggle.Feature] == FeatureState.NoAccess, "Config revocation clears the toggle");
+        core.Config = configuredGroup;
+        core.RefreshGroupAccess(1, user, withoutToggle, Apply);
+        Require(user.FeatureState[toggle.Feature] == FeatureState.Disabled, "Regrant restores the saved toggle");
+        core.RefreshGroupAccess(1, user, configuredGroup, (_, _) => throw new Exception("Spurious config change"));
     }
 
     private static IEnumerable<string?> Values(VipCore core) =>
@@ -57,6 +80,11 @@ internal static class FeatureReloadTests
     private static void Require(bool condition, string scenario)
     {
         if (!condition) throw new InvalidOperationException(scenario);
+    }
+
+    private sealed class TestToggle(IVipCoreApi api) : VipFeatureBase(api)
+    {
+        public override string Feature => "endurance";
     }
 
     private sealed class TestTrail(IVipCoreApi api) : VipFeatureBase(api)

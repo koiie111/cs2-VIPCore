@@ -11,7 +11,7 @@ using static VipCoreApi.IVipCoreApi;
 
 namespace VIPCore;
 
-public class VipCoreApi : IVipCoreApi
+public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi
 {
     private readonly VipCore _vipCore;
     private Dictionary<ulong, PlayerCookie> _playersCookie = [];
@@ -20,6 +20,7 @@ public class VipCoreApi : IVipCoreApi
     public event Action<CCSPlayerController, string>? PlayerLoaded;
     public event Action<CCSPlayerController, string>? PlayerRemoved;
     public event Action? OnCoreReady;
+    public event Action<CCSPlayerController, string, FeatureState>? PlayerFeatureStateSet;
     public event Func<CCSPlayerController, string, FeatureState, FeatureType, HookResult?>? OnPlayerUseFeature;
 
     public string GetTranslatedText(string name, params object[] args) => _vipCore.Localizer[name, args];
@@ -102,15 +103,22 @@ public class VipCoreApi : IVipCoreApi
         return user.FeatureState.GetValueOrDefault(feature, FeatureState.NoAccess);
     }
 
+    public FeatureState GetPlayerFeatureStateOrDefault(CCSPlayerController player, string feature) =>
+        _vipCore.Users.TryGetValue(player.SteamID, out var user)
+            ? user.FeatureState.GetValueOrDefault(feature, FeatureState.NoAccess)
+            : FeatureState.NoAccess;
+
     public void SetPlayerFeatureState(CCSPlayerController player, string feature, FeatureState newState)
     {
         if (!_vipCore.Users.TryGetValue(player.SteamID, out var user))
             throw new InvalidOperationException("player not found");
 
-        if (!user.FeatureState.ContainsKey(feature))
+        if (!user.FeatureState.TryGetValue(feature, out var oldState))
             throw new InvalidOperationException("feature not found");
 
+        if (oldState == newState) return;
         user.FeatureState[feature] = newState;
+        PlayerFeatureStateSet?.Invoke(player, feature, newState);
     }
 
     public void DisableAllFeatures()
@@ -143,8 +151,7 @@ public class VipCoreApi : IVipCoreApi
 
         if (!_vipCore.Config.Groups.TryGetValue(user.group, out var vipGroup)) return false;
 
-        return vipGroup.Values.Any(vipGroupValue =>
-            vipGroupValue.Key == feature && !string.IsNullOrEmpty(vipGroupValue.Value.ToString()));
+        return vipGroup.HasFeature(feature);
     }
 
     public string GetClientVipGroup(CCSPlayerController player)

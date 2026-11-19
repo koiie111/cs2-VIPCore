@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../VipCoreApi/IVipFeatureStateApi.cs" Link="IVipFeatureStateApi.cs" />
     <Compile Include="../../modules/VIP_Endurance/VIP_Endurance.cs" Link="VIP_Endurance.cs" />
   </ItemGroup>
 </Project>

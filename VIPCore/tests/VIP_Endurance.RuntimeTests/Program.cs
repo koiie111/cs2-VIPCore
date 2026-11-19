@@ -11,21 +11,27 @@ static void Require(bool condition, string test)
 }
 
 var api = new FakeApi();
-PluginCapability<IVipCoreApi>.Value = api;
+PluginCapability<IVipCoreApi>.Value = null;
 var plugin = new VipEndurance();
 plugin.Load(false);
 plugin.OnAllPluginsLoaded(false);
 Server.Advance();
+Require(api.Registrations == 0 && plugin.RetryTimer != null, "Wait for late VIPCore provider");
+PluginCapability<IVipCoreApi>.Value = api;
+plugin.RetryTimer!.Fire();
+Require(plugin.RetryTimer.Killed, "Stop initialization timer after binding");
 api.Ready();
 Require(api.Registrations == 1 && Utilities.Visits == 0, "Register once, without enumerating before map start");
 
-var player = new CCSPlayerController { Slot = 63 };
+var player = new CCSPlayerController { Slot = 64 };
+Utilities.Players[0] = new CCSPlayerController { Slot = 0 }; // ordinary player during restore
 Utilities.Players[player.Slot] = player;
 api.States[player] = FeatureState.Enabled;
 api.CoreEnabled = false;
 Server.MapName = "test";
 plugin.Listener<Listeners.OnMapStart>()(Server.MapName);
 Server.Advance();
+Server.Advance(); // apply first tick subscription after restore
 var tick = plugin.Listener<Listeners.OnTick>();
 var pawn = player.PlayerPawn.Value!;
 pawn.VelocityModifier = 0.5f;
@@ -66,11 +72,34 @@ Require(newPawn.VelocityModifier == 1 && pawn.VelocityModifier == 0.5f, "Access 
 
 void ExpectNoCandidates(string test)
 {
-    Utilities.Visits = 0;
-    tick();
-    Require(Utilities.Visits == 0, test);
+    Utilities.Visits = CCSPlayerController.AliveChecks = 0;
+    tick(); // even a callback already in flight must see the empty selection
+    Server.Advance();
+    Require(Utilities.Visits == 0 && CCSPlayerController.AliveChecks == 0 && plugin.FindListener<Listeners.OnTick>() == null, test);
 }
 
+api.SetState(player, "other", FeatureState.Disabled);
+newPawn.VelocityModifier = 0.5f;
+tick();
+Require(newPawn.VelocityModifier == 1, "Ignore unrelated setter notifications");
+api.SetState(player, "endurance", FeatureState.Disabled);
+ExpectNoCandidates("External setter removes the last listener");
+api.SetState(player, "endurance", FeatureState.Enabled);
+Server.Advance();
+newPawn.VelocityModifier = 0.5f;
+plugin.Listener<Listeners.OnTick>()();
+Require(newPawn.VelocityModifier == 1, "External setter wakes an idle module");
+
+var replacement = new CCSPlayerController { Slot = player.Slot };
+Utilities.Players[player.Slot] = replacement;
+replacement.PlayerPawn.Value!.VelocityModifier = 0.3f;
+newPawn.VelocityModifier = 0.4f;
+player.IsValid = false;
+tick();
+Require(newPawn.VelocityModifier == 0.4f && replacement.PlayerPawn.Value.VelocityModifier == 0.3f,
+    "An invalid cached entity handle cannot apply a previous selection to a replacement controller");
+player.IsValid = true;
+Utilities.Players[player.Slot] = player;
 api.Toggle(player, FeatureState.Disabled);
 ExpectNoCandidates("Toggle off");
 api.Toggle(player, FeatureState.Enabled);
@@ -86,7 +115,8 @@ ExpectNoCandidates("Slot reuse");
 Utilities.Players[player.Slot] = player;
 api.Loaded(player);
 plugin.Listener<Listeners.OnMapEnd>()();
-ExpectNoCandidates("Map end");
+api.Loaded(player);
+ExpectNoCandidates("Late player event after map end");
 plugin.Listener<Listeners.OnMapStart>()("next");
 plugin.Unload(true);
 Server.Advance();
@@ -98,7 +128,9 @@ Require(api.Subscribers == 0 && api.Feature == null, "All VIP subscriptions remo
 plugin = new VipEndurance();
 plugin.Load(true);
 plugin.OnAllPluginsLoaded(true);
-Server.Advance();
+Server.Advance(); // initialize
+Server.Advance(); // restore
+Server.Advance(); // bind tick
 tick = plugin.Listener<Listeners.OnTick>();
 newPawn.VelocityModifier = 0.7f;
 tick();
@@ -111,22 +143,25 @@ early.Unload(false);
 Server.Advance();
 Require(api.Registrations == 2, "Unloaded before initialization");
 
+PluginCapability<IVipCoreApi>.Value = null;
+var waiting = new VipEndurance();
+waiting.Load(false);
+Server.Advance();
+waiting.Unload(false);
+PluginCapability<IVipCoreApi>.Value = api;
+waiting.RetryTimer!.Fire();
+Require(waiting.RetryTimer.Killed && api.Registrations == 2, "Unload cancels retries for a missing provider");
+
 plugin = new VipEndurance();
 plugin.Load(true);
 plugin.OnAllPluginsLoaded(true);
-Server.Advance();
+Server.Advance(); // initialize
+Server.Advance(); // restore
+Server.Advance(); // bind tick
 tick = plugin.Listener<Listeners.OnTick>();
 Console.WriteLine("Runtime regression checks passed");
-Console.WriteLine("players selected slowed | original visits/checks/writes/bytes | optimized visits/checks/writes/bytes");
-
-for (var i = 0; i < 64; i++)
-{
-    if (Utilities.Players[i] is { } existing) api.Removed(existing);
-    Utilities.Players[i] = null;
-}
-
+Console.WriteLine("players VIPs selected slowed | baseline slotLookups/aliveChecks/vipChecks/writes/bytes | optimized");
 var selected = new bool[64];
-var originalWrites = 0;
 Action original = () =>
 {
     foreach (var client in Utilities.GetPlayers().Where(client =>
@@ -134,55 +169,67 @@ Action original = () =>
                  api.PlayerHasFeature(client) && selected[client.Slot]))
     {
         if (client.PlayerPawn.Value is { IsValid: true, VelocityModifier: < 1 } activePawn)
-        {
             activePawn.VelocityModifier = 1;
-            originalWrites++;
-        }
     }
 };
 
 const int iterations = 10000;
-foreach (var (count, active, slowed) in new[] { (0, 0, false), (64, 0, false), (64, 1, false), (64, 8, false), (64, 8, true) })
+Utilities.MaxPlayers = 64;
+foreach (var (count, vips, active, slowed) in new[]
+         {
+             (0, 0, 0, 0), (64, 0, 0, 0), (64, 64, 0, 0), (64, 8, 1, 0),
+             (64, 8, 8, 2), (64, 8, 8, 8), (64, 64, 8, 8), (64, 64, 64, 64)
+         })
 {
-    var activePawns = new Pawn[active];
+    foreach (var previous in Utilities.Players)
+        if (previous != null) api.Removed(previous);
+    Array.Clear(Utilities.Players);
+    api.States.Clear();
+    var slowedPawns = new Pawn[slowed];
     for (var slot = 0; slot < count; slot++)
     {
-        var client = Utilities.Players[slot] ??= new CCSPlayerController { Slot = slot };
+        var client = Utilities.Players[slot] = new CCSPlayerController { Slot = slot };
         selected[slot] = slot < active;
-        api.Toggle(client, selected[slot] ? FeatureState.Enabled : FeatureState.Disabled);
-        if (selected[slot]) activePawns[slot] = client.PlayerPawn.Value!;
+        if (slot < vips) api.Toggle(client, selected[slot] ? FeatureState.Enabled : FeatureState.Disabled);
+        if (slot < slowed) slowedPawns[slot] = client.PlayerPawn.Value!;
     }
 
-    (int visits, int checks, int writes, long bytes) Measure(Action work)
+    Server.Advance();
+    var listener = plugin.FindListener<Listeners.OnTick>();
+    Require((listener != null) == (active > 0), "Dispatch only with selected slots");
+
+    (int lookups, int alive, int checks, int writes, long bytes) Measure(Action work)
     {
         work();
-        Utilities.Visits = api.Checks = 0;
+        Utilities.Visits = CCSPlayerController.AliveChecks = api.Checks = 0;
         var writes = 0;
         var before = GC.GetAllocatedBytesForCurrentThread();
         for (var i = 0; i < iterations; i++)
         {
-            if (slowed)
-                foreach (var target in activePawns) target.VelocityModifier = 0.8f;
+            foreach (var target in slowedPawns) target.VelocityModifier = 0.8f;
             work();
-            if (slowed)
-                foreach (var target in activePawns)
-                    if (target.VelocityModifier == 1) writes++;
+            foreach (var target in slowedPawns)
+                if (target.VelocityModifier == 1) writes++;
         }
-        return (Utilities.Visits / iterations, api.Checks / iterations, writes / iterations,
-            (GC.GetAllocatedBytesForCurrentThread() - before) / iterations);
+        return (Utilities.Visits / iterations, CCSPlayerController.AliveChecks / iterations, api.Checks / iterations, writes / iterations,
+            GC.GetAllocatedBytesForCurrentThread() - before);
     }
 
     var baseline = Measure(original);
-    var candidate = Measure(tick.Invoke);
-    Require(candidate.visits == active && candidate.checks == (slowed ? active * 2 : 0) &&
-            candidate.writes == baseline.writes && candidate.bytes == 0, "Hot path work and writes");
-    Console.WriteLine($"{count,7} {active,8} {slowed,6} | {baseline} | {candidate}");
+    var candidate = Measure(() => listener?.Invoke());
+    Require(baseline.lookups == 64 && baseline.alive == count && baseline.checks == count + vips && baseline.writes == slowed,
+        "Baseline performs the expected work");
+    Require(candidate.lookups == 0 && candidate.alive == active && candidate.checks == slowed * 2 &&
+            candidate.writes == slowed && candidate.bytes == 0, "Hot path work, writes and total allocated bytes");
+    Console.WriteLine($"{count,7} {vips,4} {active,8} {slowed,6} | " +
+        $"{(baseline.lookups, baseline.alive, baseline.checks, baseline.writes, baseline.bytes / iterations)} | {candidate}");
 }
-Require(originalWrites == iterations * 8, "Baseline writes match the slowed fixture");
+plugin.Unload(false);
 
-sealed class FakeApi : IVipCoreApi
+sealed class FakeApi : IVipCoreApi, IVipFeatureStateApi
 {
     public event Action? OnCoreReady;
+    public event Action<CCSPlayerController, string, FeatureState>? PlayerFeatureStateSet;
     public event Action<CCSPlayerController>? OnPlayerSpawn;
     public event Action<CCSPlayerController, string>? PlayerLoaded;
     public event Action<CCSPlayerController, string>? PlayerRemoved;
@@ -195,12 +242,22 @@ sealed class FakeApi : IVipCoreApi
 
     public int Subscribers => (OnCoreReady?.GetInvocationList().Length ?? 0)
         + (OnPlayerSpawn?.GetInvocationList().Length ?? 0)
+        + (PlayerFeatureStateSet?.GetInvocationList().Length ?? 0)
         + (PlayerLoaded?.GetInvocationList().Length ?? 0)
         + (PlayerRemoved?.GetInvocationList().Length ?? 0);
 
     public void Ready() => OnCoreReady?.Invoke();
     public void Loaded(CCSPlayerController player) => PlayerLoaded?.Invoke(player, "vip");
     public void Removed(CCSPlayerController player) => PlayerRemoved?.Invoke(player, "vip");
+
+    public FeatureState GetPlayerFeatureStateOrDefault(CCSPlayerController player, string feature) =>
+        States.GetValueOrDefault(player, FeatureState.NoAccess);
+
+    public void SetState(CCSPlayerController player, string feature, FeatureState state)
+    {
+        if (feature == "endurance") States[player] = state;
+        PlayerFeatureStateSet?.Invoke(player, feature, state);
+    }
 
     public void Toggle(CCSPlayerController player, FeatureState state)
     {
