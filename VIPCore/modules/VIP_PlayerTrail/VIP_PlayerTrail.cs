@@ -16,7 +16,11 @@ public class VipPlayerTrail : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Player Trail";
+#if BHOP_COMPATIBILITY
+    public override string ModuleVersion => "1.1.2-bhop.2";
+#else
     public override string ModuleVersion => "1.1.1";
+#endif
     public override string ModuleDescription => "Draws a beam or particle trail behind VIP players";
 
     private bool _unloaded;
@@ -31,7 +35,9 @@ public class VipPlayerTrail : BasePlugin
         Server.NextWorldUpdate(Initialize);
     }
 
+#if !BHOP_COMPATIBILITY
     public override void OnAllPluginsLoaded(bool hotReload) => Initialize();
+#endif
 
     private void Initialize()
     {
@@ -615,19 +621,29 @@ public class PlayerTrail : VipFeatureBase
 
     private void CreateBeam(int owner, Vector3 from, Vector3 to, Color color, float width, double deadline)
     {
+#if BHOP_COMPATIBILITY
+        // Keep the existing BHOP beam class and explicit spawn sequence.
+        var beam = Utilities.CreateEntityByName<CBeam>("beam");
+#else
         var beam = Utilities.CreateEntityByName<CEnvBeam>("env_beam");
+#endif
         if (beam is not { IsValid: true }) return;
 
         Track(owner, beam, deadline);
         beam.Width = width;
         beam.Render = color;
+#if !BHOP_COMPATIBILITY
         beam.SetModel(BeamSprite);
+#endif
         beam.Teleport(from, Vector3.Zero, Vector3.Zero);
 
         var end = beam.EndPos;
         end.X = to.X;
         end.Y = to.Y;
         end.Z = to.Z;
+#if BHOP_COMPATIBILITY
+        beam.DispatchSpawn();
+#endif
         Utilities.SetStateChanged(beam, "CBeam", "m_vecEndPos");
     }
 
