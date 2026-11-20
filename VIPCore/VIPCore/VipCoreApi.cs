@@ -11,7 +11,7 @@ using static VipCoreApi.IVipCoreApi;
 
 namespace VIPCore;
 
-public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi, IVipConfigReloadApi
+public class VipCoreApi : IVipCoreApi, IVipFeatureAvailabilityApi, IVipConfigReloadApi
 {
     private readonly VipCore _vipCore;
     private Dictionary<ulong, PlayerCookie> _playersCookie = [];
@@ -21,6 +21,8 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi, IVipConfigReloadApi
     public event Action<CCSPlayerController, string>? PlayerRemoved;
     public event Action? OnCoreReady;
     public event Action? ConfigReloaded;
+    public event Action? FeatureAvailabilityChanged;
+    internal void NotifyFeatureAvailabilityChanged() => FeatureAvailabilityChanged?.Invoke();
     public event Action<CCSPlayerController, string, FeatureState>? PlayerFeatureStateSet;
     public event Func<CCSPlayerController, string, FeatureState, FeatureType, HookResult?>? OnPlayerUseFeature;
 
@@ -132,14 +134,16 @@ public class VipCoreApi : IVipCoreApi, IVipFeatureStateApi, IVipConfigReloadApi
         _vipCore.ForcedDisabledFeatures.Clear();
 
         foreach (var feature in _vipCore.Features.Keys)
-        {
             _vipCore.ForcedDisabledFeatures.Add(feature);
-        }
+
+        NotifyFeatureAvailabilityChanged();
     }
 
     public void EnableAllFeatures()
     {
+        if (_vipCore.ForcedDisabledFeatures.Count == 0) return;
         _vipCore.ForcedDisabledFeatures.Clear();
+        NotifyFeatureAvailabilityChanged();
     }
 
     public bool IsClientVip(CCSPlayerController player)

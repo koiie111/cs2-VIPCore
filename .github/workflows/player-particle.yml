@@ -1,0 +1,26 @@
+name: PlayerParticle checks
+
+on:
+  pull_request:
+    paths:
+      - 'VIPCore/modules/VIP_PlayerParticle/**'
+      - 'VIPCore/tests/VIP_PlayerParticle.RuntimeTests/**'
+      - 'VIPCore/tests/VIP_PlayerTrail.RuntimeTests/**'
+      - 'VIPCore/VIPCore/**'
+      - 'VIPCore/VipCoreApi/**'
+      - '.github/workflows/player-particle.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet publish VIPCore/modules/VIP_PlayerParticle -c Release
+      - run: dotnet run --project VIPCore/tests/VIP_PlayerParticle.RuntimeTests -c Release
+      - run: dotnet run --project VIPCore/tests/VIP_PlayerTrail.RuntimeTests -c Release

@@ -11,3 +11,9 @@ public interface IVipFeatureStateApi
     // Programmatic changes via SetPlayerFeatureState. Menu clicks already dispatch OnSelectItem.
     event Action<CCSPlayerController, string, FeatureState>? PlayerFeatureStateSet;
 }
+
+// Optional notification for modules that cache live effects or recipient preferences.
+public interface IVipFeatureAvailabilityApi : IVipFeatureStateApi
+{
+    event Action? FeatureAvailabilityChanged;
+}
