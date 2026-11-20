@@ -1,0 +1,7 @@
+{
+  "buyteamweapon.round_start": "Зброя супротивника: {0}",
+  "buyteamweapon.in_buy_zone": "Ви маєте перебувати в зоні купівлі.",
+  "buyteamweapon.no_money": "Недостатньо грошей для купівлі.",
+  "buyteamweapon.wait_for_spawn": "Дочекайтеся стартових VIP-бонусів і повторіть купівлю.",
+  "buyteamweapon.give_failed": "Зброю не видано. Гроші не списано."
+}

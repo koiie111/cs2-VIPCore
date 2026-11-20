@@ -1,7 +1,6 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Capabilities;
-using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Utils;
 using VipCoreApi;
 using static VipCoreApi.IVipCoreApi;
@@ -12,8 +11,8 @@ public class VipBuyTeamWeapon : BasePlugin
 {
     public override string ModuleAuthor => "thesamefabius";
     public override string ModuleName => "[VIP] BuyTeamWeapon";
-    public override string ModuleVersion => "1.0.4";
-    
+    public override string ModuleVersion => "1.0.5";
+
     private BuyTeamWeapon? _buyTeamWeapon;
     private IVipCoreApi? _api;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
@@ -26,7 +25,7 @@ public class VipBuyTeamWeapon : BasePlugin
         _buyTeamWeapon = new BuyTeamWeapon(this, _api, hotReload);
         _api.RegisterFeature(_buyTeamWeapon, FeatureType.Hide);
     }
-    
+
     public override void Unload(bool hotReload)
     {
         if (_buyTeamWeapon != null)
@@ -40,6 +39,37 @@ public class VipBuyTeamWeapon : BasePlugin
 public class BuyTeamWeapon : VipFeatureBase
 {
     public override string Feature => "BuyTeamWeapon";
+    private sealed record Weapon(string Command, string EntityName, CsTeam NativeTeam, int Price);
+
+    private static readonly Weapon[] Weapons =
+    [
+        new("glock", "weapon_glock", CsTeam.Terrorist, 200),
+        new("tec9", "weapon_tec9", CsTeam.Terrorist, 500),
+        new("mac10", "weapon_mac10", CsTeam.Terrorist, 1050),
+        new("sawedoff", "weapon_sawedoff", CsTeam.Terrorist, 1100),
+        new("galil", "weapon_galilar", CsTeam.Terrorist, 1800),
+        new("ak47", "weapon_ak47", CsTeam.Terrorist, 2700),
+        new("sg553", "weapon_sg556", CsTeam.Terrorist, 3000),
+        new("g3sg1", "weapon_g3sg1", CsTeam.Terrorist, 5000),
+        new("usp", "weapon_usp_silencer", CsTeam.CounterTerrorist, 200),
+        new("p2000", "weapon_hkp2000", CsTeam.CounterTerrorist, 200),
+        new("fiveseven", "weapon_fiveseven", CsTeam.CounterTerrorist, 500),
+        new("mp9", "weapon_mp9", CsTeam.CounterTerrorist, 1250),
+        new("mag7", "weapon_mag7", CsTeam.CounterTerrorist, 1300),
+        new("famas", "weapon_famas", CsTeam.CounterTerrorist, 1950),
+        new("m4a1", "weapon_m4a1_silencer", CsTeam.CounterTerrorist, 2900),
+        new("m4a4", "weapon_m4a1", CsTeam.CounterTerrorist, 2900),
+        new("aug", "weapon_aug", CsTeam.CounterTerrorist, 3300),
+        new("scar20", "weapon_scar20", CsTeam.CounterTerrorist, 5000),
+    ];
+
+    private static readonly string TerroristCommands = ListCommands(CsTeam.Terrorist);
+    private static readonly string CounterTerroristCommands = ListCommands(CsTeam.CounterTerrorist);
+
+    private static string ListCommands(CsTeam team) =>
+        string.Join(", ", Weapons.Where(weapon => weapon.NativeTeam == team).Select(weapon => $"!{weapon.Command}"));
+
+    private readonly BasePlugin _plugin;
     private readonly Dictionary<int, IntPtr> _readyPawns = new();
     private bool _stopped;
 
@@ -54,10 +84,18 @@ public class BuyTeamWeapon : VipFeatureBase
 
     public BuyTeamWeapon(BasePlugin basePlugin, IVipCoreApi api, bool hotReload) : base(api)
     {
+        _plugin = basePlugin;
+
         // Players already alive during hot loading have received their spawn bonuses.
         if (hotReload)
-            foreach (var player in Utilities.GetPlayers().Where(p => p.IsValid && p.PawnIsAlive))
-                if (player.PlayerPawn.Value is { } pawn) _readyPawns[player.Slot] = pawn.Handle;
+        {
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player.IsValid && player.PawnIsAlive && player.PlayerPawn.Value is { IsValid: true } pawn)
+                    _readyPawns[player.Slot] = pawn.Handle;
+            }
+        }
+
         basePlugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
             if (ev.Userid is { } player) _readyPawns.Remove(player.Slot);
@@ -67,17 +105,14 @@ public class BuyTeamWeapon : VipFeatureBase
         basePlugin.AddCommand("css_buyteamweapon_status", "Purchase diagnostics", (player, info) =>
         {
             if (player != null) return;
-            info.ReplyToCommand($"BuyTeamWeapon 1.0.4 spawn_gate=on account_sync=on ready={_readyPawns.Count}");
+            info.ReplyToCommand($"BuyTeamWeapon {basePlugin.ModuleVersion} spawn_gate=on account_sync=on ready={_readyPawns.Count}");
         });
         basePlugin.RegisterEventHandler<EventRoundStart>(EventRoundStart);
-        
-        basePlugin.AddCommand("css_ak47", "buy ak47", (player, _) => BuyWeapon(player, "weapon_ak47", 2700));
-        basePlugin.AddCommand("css_m4a1", "buy m4a1", (player, _) => BuyWeapon(player, "weapon_m4a1_silencer", 2900));
-        basePlugin.AddCommand("css_m4a4", "buy m4a4", (player, _) => BuyWeapon(player, "weapon_m4a1", 3000));
-        basePlugin.AddCommand("css_glock", "buy glock", (player, _) => BuyWeapon(player, "weapon_glock", 200));
-        basePlugin.AddCommand("css_usp", "buy usp", (player, _) => BuyWeapon(player, "weapon_usp_silencer", 200));
+
+        foreach (var weapon in Weapons)
+            basePlugin.AddCommand($"css_{weapon.Command}", $"Buy {weapon.Command}", (player, _) => BuyWeapon(player, weapon));
     }
-    
+
     public override void OnPlayerSpawn(CCSPlayerController player)
     {
         var pawnHandle = player.PlayerPawn.Value?.Handle;
@@ -93,23 +128,34 @@ public class BuyTeamWeapon : VipFeatureBase
 
     private HookResult EventRoundStart(EventRoundStart @event, GameEventInfo info)
     {
-        foreach (var player in Utilities.GetPlayers().Where(u => IsClientVip(u) && PlayerHasFeature(u) && GetFeatureValue<bool>(u) && u.PawnIsAlive))
+        if (_stopped) return HookResult.Continue;
+
+        string? terroristHint = null;
+        string? counterTerroristHint = null;
+        foreach (var player in Utilities.GetPlayers())
         {
-            PrintToChat(player, 
-                GetTranslatedText("buyteamweapon.round_start", 
-                    player.Team is CsTeam.Terrorist 
-                ? "!m4a1, !m4a4, !glock"
-                : "!ak47, !usp"));
+            if (!player.IsValid || !player.PawnIsAlive) continue;
+
+            var team = player.Team;
+            if (team is not (CsTeam.Terrorist or CsTeam.CounterTerrorist) || !CanBuyTeamWeapon(player)) continue;
+
+            var hint = team == CsTeam.Terrorist
+                ? (terroristHint ??= _plugin.Localizer["buyteamweapon.round_start", CounterTerroristCommands])
+                : (counterTerroristHint ??= _plugin.Localizer["buyteamweapon.round_start", TerroristCommands]);
+            PrintToChat(player, hint);
         }
 
         return HookResult.Continue;
     }
 
-    private void BuyWeapon(CCSPlayerController? player, string weaponName, int price)
+    private bool CanBuyTeamWeapon(CCSPlayerController player) =>
+        IsClientVip(player) && PlayerHasFeature(player) && GetFeatureValue<bool>(player);
+
+    private void BuyWeapon(CCSPlayerController? player, Weapon weapon)
     {
-        if (player is null || !player.IsValid) return;
-        
-        if (!IsClientVip(player) || !PlayerHasFeature(player) || !GetFeatureValue<bool>(player) || !player.PawnIsAlive)
+        if (_stopped || player is null || !player.IsValid) return;
+
+        if (!player.PawnIsAlive || !CanBuyTeamWeapon(player))
         {
             PrintToChat(player, GetTranslatedText("vip.NoAccess"));
             return;
@@ -119,27 +165,31 @@ public class BuyTeamWeapon : VipFeatureBase
         if (playerPawn is null || !playerPawn.IsValid) return;
         if (!_readyPawns.TryGetValue(player.Slot, out var readyPawn) || readyPawn != playerPawn.Handle)
         {
-            player.PrintToChat("[VIP] Дождитесь выдачи стартовых VIP-бонусов и повторите покупку.");
+            PrintToChat(player, _plugin.Localizer["buyteamweapon.wait_for_spawn"]);
             return;
         }
         if (!playerPawn.InBuyZone)
         {
-            PrintToChat(player, GetTranslatedText("buyteamweapon.in_buy_zone"));
+            PrintToChat(player, _plugin.Localizer["buyteamweapon.in_buy_zone"]);
             return;
         }
-        
-        var moneySerivce = player.InGameMoneyServices;
-        if (moneySerivce is null) return;
 
-        if (moneySerivce.Account < price)
+        var moneyServices = player.InGameMoneyServices;
+        if (moneyServices is null) return;
+
+        if (moneyServices.Account < weapon.Price)
         {
-            PrintToChat(player, GetTranslatedText("buyteamweapon.no_money"));
+            PrintToChat(player, _plugin.Localizer["buyteamweapon.no_money"]);
             return;
         }
 
-        moneySerivce.Account -= price;
+        if (player.GiveNamedItem(weapon.EntityName) == IntPtr.Zero)
+        {
+            PrintToChat(player, _plugin.Localizer["buyteamweapon.give_failed"]);
+            return;
+        }
+
+        moneyServices.Account -= weapon.Price;
         Utilities.SetStateChanged(player, "CCSPlayerController_InGameMoneyServices", "m_iAccount");
-        
-        player.GiveNamedItem(weaponName);
     }
 }
