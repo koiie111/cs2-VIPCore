@@ -1,1 +1,14 @@
-<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup><ItemGroup><Compile Include="../../modules/VIP_Postprocessing/PostprocessingPolicy.cs" Link="PostprocessingPolicy.cs" /></ItemGroup></Project>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../VipCoreApi/IVipConfigReloadApi.cs" Link="IVipConfigReloadApi.cs" />
+    <Compile Include="../../modules/VIP_Postprocessing/VIP_Postprocessing.cs" Link="VIP_Postprocessing.cs" />
+    <Compile Include="../../modules/VIP_Postprocessing/PostprocessingPolicy.cs" Link="PostprocessingPolicy.cs" />
+    <Compile Include="../../modules/VIP_Postprocessing/VolumeVisibility.cs" Link="VolumeVisibility.cs" />
+  </ItemGroup>
+</Project>

@@ -425,6 +425,7 @@ public class VipCore : BasePlugin
             RefreshGroupAccess(steamId, user, previous, (key, state) =>
                 VipApi.SetPlayerFeatureState(player, key, state));
         }
+        VipApi.NotifyConfigReloaded();
 
         const string msg = "configuration successfully rebooted!";
 
