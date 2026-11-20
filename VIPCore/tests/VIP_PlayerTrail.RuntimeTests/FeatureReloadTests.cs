@@ -82,6 +82,20 @@ internal static class FeatureReloadTests
         core.RefreshGroupAccess(1, user, withoutToggle, Apply);
         Require(user.FeatureState[toggle.Feature] == FeatureState.Disabled, "Regrant restores the saved toggle");
         core.RefreshGroupAccess(1, user, configuredGroup, (_, _) => throw new Exception("Spurious config change"));
+
+        // A temporary VIP is stored only under the authorized SteamID.
+        const ulong authorizedSteamId = 76561198000000001;
+        const ulong controllerSteamId = 76561198000000002;
+        var temporary = new User { name = "LAN host", group = "VIP" };
+        core.Users[authorizedSteamId] = temporary;
+        core.SetClientFeature(authorizedSteamId, temporary.group);
+
+        var steamId = VipCore.GetPlayerSteamId(authorizedSteamId, controllerSteamId);
+        Require(!core.Users.ContainsKey(controllerSteamId), "Temporary VIP has a single authorized record");
+        Require(api.GetPlayerFeatureState(steamId, toggle.Feature) == FeatureState.Enabled,
+            "A different controller SteamID can read the temporary VIP toggle");
+        Require(VipCore.GetPlayerSteamId(null, controllerSteamId) == controllerSteamId,
+            "An unavailable authorized SteamID falls back to the controller SteamID");
     }
 
     private static IEnumerable<string?> Values(VipCore core) =>

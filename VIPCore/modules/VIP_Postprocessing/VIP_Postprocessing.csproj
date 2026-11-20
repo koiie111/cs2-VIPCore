@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <AssemblyName>VIP_Postprocessing_4ill_1_0_3</AssemblyName>
+    <AssemblyName>VIP_Postprocessing_4ill_1_0_5</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
@@ -11,15 +11,17 @@
     <PackageReference Include="CounterStrikeSharp.API" Version="1.0.378" />
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="VipCoreApi">
-      <HintPath>..\..\VipCoreApi.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+    <ProjectReference Include="../../VipCoreApi/VipCoreApi.csproj" Private="false" />
   </ItemGroup>
 
   <Target Name="CopyAutoLoadEntryPoint" AfterTargets="Build">
     <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(TargetDir)VIP_Postprocessing.dll" />
     <Copy SourceFiles="$(TargetDir)$(AssemblyName).deps.json" DestinationFiles="$(TargetDir)VIP_Postprocessing.deps.json" />
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(TargetDir)VIP_Postprocessing.pdb" />
+    <Copy Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" SourceFiles="$(TargetDir)$(AssemblyName).pdb" DestinationFiles="$(TargetDir)VIP_Postprocessing.pdb" />
+  </Target>
+  <Target Name="PublishAutoLoadEntryPoint" AfterTargets="Publish">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).dll" DestinationFiles="$(PublishDir)VIP_Postprocessing.dll" />
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).deps.json" DestinationFiles="$(PublishDir)VIP_Postprocessing.deps.json" />
+    <Copy Condition="Exists('$(PublishDir)$(AssemblyName).pdb')" SourceFiles="$(PublishDir)$(AssemblyName).pdb" DestinationFiles="$(PublishDir)VIP_Postprocessing.pdb" />
   </Target>
 </Project>

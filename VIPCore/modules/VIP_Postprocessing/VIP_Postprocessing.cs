@@ -17,7 +17,8 @@ public class VipPostprocessing : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] Postprocessing";
-    public override string ModuleVersion => "1.0.3";
+    public const string Version = "1.0.5";
+    public override string ModuleVersion => Version;
     public override string ModuleDescription => "Selectable screen post-processing (color grading) for VIP players";
 
     private Postprocessing? _feature;
@@ -25,12 +26,13 @@ public class VipPostprocessing : BasePlugin
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     private bool _mapRunning;
+    private bool _unloaded;
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _initializationRetry;
 
     public override void Load(bool hotReload)
     {
-        // Cold start loads modules before the map: no entity system and no global variables yet. Anything that
-        // enumerates players or entities waits for OnMapStart; a live (hot) load already has a running map.
-        _mapRunning = hotReload || !string.IsNullOrEmpty(Server.MapName);
+        // Even a reload can occur between maps, before the entity system is available.
+        _mapRunning = !string.IsNullOrEmpty(Server.MapName);
         RegisterListener<Listeners.OnMapStart>(_ => _mapRunning = true);
         RegisterListener<Listeners.OnMapEnd>(() => _mapRunning = false);
         // Post-processing resources must be precached on map load, so this listener lives on the plugin itself.
@@ -38,7 +40,7 @@ public class VipPostprocessing : BasePlugin
         AddCommand("css_postprocessing_status", "Server-console-only postprocessing safety diagnostics", (player, command) =>
         {
             if (player != null) return;
-            command.ReplyToCommand(_feature?.Diagnostics() ?? "Postprocessing 1.0.3: feature not ready");
+            command.ReplyToCommand(_feature?.Diagnostics() ?? $"Postprocessing {Version}: feature not ready");
         });
         Server.NextWorldUpdate(Initialize);
     }
@@ -47,9 +49,22 @@ public class VipPostprocessing : BasePlugin
 
     private void Initialize()
     {
-        if (_api != null) return;
-        _api = PluginCapability.Get();
-        if (_api == null) return;
+        if (_unloaded || _api != null) return;
+        try
+        {
+            _api = PluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            // CSS throws when VIPCore has not registered the capability yet.
+        }
+        if (_api == null)
+        {
+            _initializationRetry ??= AddTimer(2f, Initialize, TimerFlags.REPEAT);
+            return;
+        }
+        _initializationRetry?.Kill();
+        _initializationRetry = null;
         _api.OnCoreReady += RegisterFeature;
         // The core-ready event has already fired when loading this module on a live server.
         RegisterFeature();
@@ -60,10 +75,13 @@ public class VipPostprocessing : BasePlugin
         if (_api == null || _feature != null) return;
         _feature = new Postprocessing(this, _api, _mapRunning);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
+        _feature.Start();
     }
 
     public override void Unload(bool hotReload)
     {
+        _unloaded = true;
+        _initializationRetry?.Kill();
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeature;
         if (_feature == null) return;
@@ -94,13 +112,15 @@ public class VipPostprocessing : BasePlugin
             var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var group in groups.EnumerateObject())
             {
-                if (!group.Value.TryGetProperty("Values", out var values) ||
+                if (group.Value.ValueKind != JsonValueKind.Object ||
+                    !group.Value.TryGetProperty("Values", out var values) || values.ValueKind != JsonValueKind.Object ||
                     !values.TryGetProperty(Postprocessing.FeatureName, out var entries) ||
                     entries.ValueKind != JsonValueKind.Array)
                     continue;
 
                 foreach (var entry in entries.EnumerateArray())
-                    if (entry.TryGetProperty("file", out var file) && file.GetString() is { Length: > 0 } name)
+                    if (entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("file", out var file) &&
+                        file.ValueKind == JsonValueKind.String && file.GetString() is { Length: > 0 } name)
                         files.Add(name);
             }
 
@@ -138,7 +158,7 @@ public class Postprocessing : VipFeatureBase
     private const string Off = "off";
     private const string VolumeClass = "post_processing_volume";
     private const string VolumeName = "vipcore_postprocessing";
-    private const int MaxPlayers = 64;
+    private const int MaxPlayers = VolumeVisibility.Slots;
 
     private static readonly float[] FadeSteps = { 0f, 0.25f, 0.5f, 1f, 2f };
 
@@ -156,7 +176,7 @@ public class Postprocessing : VipFeatureBase
     /// <summary>Per-player settings, stored as one JSON cookie. A null value means "use the config default".</summary>
     private class Prefs
     {
-        /// <summary>null = never chosen (first allowed entry), "off" = disabled, otherwise an entry name.</summary>
+        /// <summary>null or "off" disables the effect. Otherwise this is the saved entry name.</summary>
         [JsonPropertyName("p")] public string? Effect { get; set; }
         [JsonPropertyName("f")] public float? Fade { get; set; }
         [JsonPropertyName("e")] public bool Exposure { get; set; } = true;
@@ -168,10 +188,15 @@ public class Postprocessing : VipFeatureBase
     public override string Feature => FeatureName;
 
     private readonly Dictionary<int, Prefs> _prefs = new();
-    private readonly CPostProcessingVolume?[] _active = new CPostProcessingVolume?[MaxPlayers];
-    private readonly List<CPostProcessingVolume> _mapVolumes = new();
+    private readonly VolumeVisibility _volumes = new();
+    private readonly PostprocessingEntry?[] _activeEntries = new PostprocessingEntry?[MaxPlayers];
+    private readonly long[] _pendingApply = new long[MaxPlayers];
     private readonly BasePlugin _plugin;
+    private readonly IVipConfigReloadApi? _configReloadApi;
     private bool _mapRunning;
+    private int _mapGeneration;
+    private long _applySequence;
+    private bool _filterRegistered;
     private int _purged;
     private long _blocked;
     private long _transmitErrors;
@@ -180,91 +205,166 @@ public class Postprocessing : VipFeatureBase
     public Postprocessing(BasePlugin plugin, IVipCoreApi api, bool mapRunning) : base(api)
     {
         _plugin = plugin;
+        _configReloadApi = api as IVipConfigReloadApi;
+        if (_configReloadApi != null) _configReloadApi.ConfigReloaded += OnConfigReloaded;
         _mapRunning = mapRunning;
         plugin.AddTimer(2f, () =>
         {
-            if (_stopped || !_mapRunning) return;
-            PurgeOrphans();
+            if (!_mapRunning || _stopped) return;
+            if (_volumes.Retiring.Count != 0)
+                RetryRemovals();
+            // Older cores also change global VIP/feature access without a per-player event.
+            var active = _volumes.Active;
+            while (active != 0)
+            {
+                var slot = VolumeVisibility.TakeSlot(ref active);
+                var player = Utilities.GetPlayerFromSlot(slot);
+                if (player is not { IsValid: true } || !CanUseFeature(player) ||
+                    _activeEntries[slot] is not { } entry || !Allowed(player, entry))
+                    ClearPlayer(slot);
+            }
         }, TimerFlags.REPEAT);
         plugin.RegisterListener<Listeners.OnMapEnd>(() =>
         {
             _mapRunning = false;
-            Array.Clear(_active);
-            _mapVolumes.Clear();
+            ResetMap();
         });
         plugin.RegisterEventHandler<EventPlayerSpawn>((ev, _) =>
         {
             var player = ev.Userid;
             if (player is not { IsValid: true }) return HookResult.Continue;
-            Remove(player.Slot);
-            Server.NextFrame(() => Apply(player));
+            if ((uint)player.Slot >= MaxPlayers) return HookResult.Continue;
+            RemoveVolume(player.Slot);
+            QueueApply(player);
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventPlayerDeath>((ev, _) =>
         {
-            Remove(ev.Userid?.Slot ?? -1);
+            ClearPlayer(ev.Userid?.Slot ?? -1);
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventPlayerTeam>((ev, _) =>
         {
-            Remove(ev.Userid?.Slot ?? -1);
+            ClearPlayer(ev.Userid?.Slot ?? -1);
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
-            RemoveAll();
-            PurgeOrphans();
-            RefreshMapVolumes();
+            RemoveActiveVolumes();
+            // Spawns may already have run. Restore surviving players as well as later spawns.
+            Start();
             return HookResult.Continue;
         });
-        plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        plugin.RegisterListener<Listeners.OnEntitySpawned>(OnEntitySpawned);
+        plugin.RegisterListener<Listeners.OnEntityDeleted>(OnEntityDeleted);
         plugin.RegisterListener<Listeners.OnMapStart>(_ =>
         {
+            ResetMap();
             _mapRunning = true;
-            Array.Clear(_active);
-            _mapVolumes.Clear();
-            Server.NextFrame(() => { if (!_stopped && _mapRunning) SyncLiveState(); });
+            var map = _mapGeneration;
+            Server.NextFrame(() =>
+            {
+                if (!_stopped && _mapRunning && map == _mapGeneration)
+                    Start();
+            });
         });
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
         {
-            Remove(slot);
+            ClearPlayer(slot);
             _prefs.Remove(slot);
         });
-
-        // Module loaded on a live server: pick up VIPs already in game. On a cold start the map does not exist yet
-        // (nothing to enumerate); volumes are collected at the first round start.
-        if (mapRunning) SyncLiveState();
     }
 
-    private void SyncLiveState()
+    public void Start()
     {
-        PurgeOrphans();
-        RefreshMapVolumes();
+        if (!_mapRunning) return;
+        RefreshVolumes();
         foreach (var player in Utilities.GetPlayers())
-            if (!player.IsBot && IsClientVip(player))
-                Apply(player);
+            QueueApply(player);
     }
 
-    /// <summary>Called on plugin unload; CounterStrikeSharp drops handlers and listeners itself.</summary>
+    private void ResetMap()
+    {
+        _mapGeneration++;
+        Array.Clear(_activeEntries);
+        Array.Clear(_pendingApply);
+        _prefs.Clear();
+        _volumes.Clear();
+        UpdateFilterRegistration();
+    }
+
+    private void QueueApply(CCSPlayerController player)
+    {
+        if (_stopped || !_mapRunning || !player.IsValid || player.IsBot) return;
+        var slot = player.Slot;
+        if ((uint)slot >= MaxPlayers) return;
+        if (!CanUseFeature(player) || !PostprocessingPolicy.HasExplicitEffect(Load(player).Effect))
+        {
+            ClearPlayer(slot);
+            return;
+        }
+        if (_pendingApply[slot] != 0) return;
+
+        var controller = player.EntityHandle.Raw;
+        var request = ++_applySequence;
+        _pendingApply[slot] = request;
+        Server.NextFrame(() =>
+        {
+            if (_stopped || _pendingApply[slot] != request) return;
+            _pendingApply[slot] = 0;
+            var current = Utilities.GetPlayerFromSlot(slot);
+            if (current is { IsValid: true } && current.EntityHandle.Raw == controller)
+                Apply(current);
+        });
+    }
+
     public void Stop()
     {
         _stopped = true;
-        RemoveAll();
-        if (_mapRunning) PurgeOrphans();
-        _mapVolumes.Clear();
-        _prefs.Clear();
+        if (_configReloadApi != null) _configReloadApi.ConfigReloaded -= OnConfigReloaded;
+        Api.OnPlayerSpawn -= OnPlayerSpawn;
+        Api.PlayerLoaded -= OnPlayerLoaded;
+        Api.PlayerRemoved -= OnPlayerRemoved;
+
+        if (_mapRunning)
+        {
+            RefreshVolumes();
+            RemoveActiveVolumes();
+            RetryRemovals();
+        }
+
+        ResetMap();
+    }
+
+    private void OnConfigReloaded()
+    {
+        var active = _volumes.Active;
+        while (active != 0)
+        {
+            var slot = VolumeVisibility.TakeSlot(ref active);
+            var player = Utilities.GetPlayerFromSlot(slot);
+            if (player is not { IsValid: true } || !CanUseFeature(player) ||
+                FindEffect(player, _activeEntries[slot]?.Name) is not { } entry)
+            {
+                ClearPlayer(slot);
+                continue;
+            }
+
+            // Subsequent permission checks must use the restrictions from the reloaded entry.
+            _activeEntries[slot] = entry;
+        }
     }
 
     public override void OnPlayerLoaded(CCSPlayerController player, string group)
     {
         if (_stopped) return;
         _prefs.Remove(player.Slot);
-        Apply(player);
+        QueueApply(player);
     }
 
     public override void OnPlayerRemoved(CCSPlayerController player, string group)
     {
-        Remove(player.Slot);
+        ClearPlayer(player.Slot);
         _prefs.Remove(player.Slot);
     }
 
@@ -328,6 +428,7 @@ public class Postprocessing : VipFeatureBase
                 {
                     var p = Load(controller);
                     p.ReplaceMap = !p.ReplaceMap;
+                    UpdateVisibility(controller, p);
                     Save(controller);
                     OnSelectItem(controller, state);
                 });
@@ -337,6 +438,7 @@ public class Postprocessing : VipFeatureBase
                 {
                     var p = Load(controller);
                     p.Spectators = !p.Spectators;
+                    UpdateVisibility(controller, p);
                     Save(controller);
                     OnSelectItem(controller, state);
                 });
@@ -367,7 +469,7 @@ public class Postprocessing : VipFeatureBase
         {
             Load(controller).Effect = Off;
             Save(controller);
-            Remove(controller.Slot);
+            ClearPlayer(controller.Slot);
             PrintToChat(controller, GetTranslatedText("postprocessing.Off"));
         }, current == Off);
 
@@ -427,28 +529,21 @@ public class Postprocessing : VipFeatureBase
     private void Save(CCSPlayerController player) =>
         SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(Load(player), PrefsJson));
 
-    /// <summary>
-    /// The entry the player picked if they may still use it, otherwise the first allowed entry
-    /// (so a fresh VIP gets an effect without opening the menu). Null when disabled.
-    /// </summary>
     private PostprocessingEntry? Current(CCSPlayerController player, List<PostprocessingEntry> entries)
     {
         var saved = Load(player).Effect;
         if (!PostprocessingPolicy.HasExplicitEffect(saved)) return null;
-        return entries.FirstOrDefault(e => e.Name == saved);
+        return entries.Find(entry => entry.Name == saved);
     }
 
-    private List<PostprocessingEntry>? TryGetEntries(CCSPlayerController player)
-    {
-        if (!IsClientVip(player) || !PlayerHasFeature(player)) return null;
-        if (GetPlayerFeatureState(player) is not FeatureState.Enabled) return null;
+    private bool CanUseFeature(CCSPlayerController player) =>
+        IsClientVip(player) && PlayerHasFeature(player) && GetPlayerFeatureState(player) is FeatureState.Enabled;
 
+    private List<PostprocessingEntry>? ReadEntries(CCSPlayerController player)
+    {
         try
         {
-            var entries = GetFeatureValue<List<PostprocessingEntry>>(player)
-                .Where(e => e.Name.Length > 0 && e.File.Length > 0 && Allowed(player, e))
-                .ToList();
-            return entries.Count > 0 ? entries : null;
+            return GetFeatureValue<List<PostprocessingEntry>>(player);
         }
         catch (Exception)
         {
@@ -456,175 +551,308 @@ public class Postprocessing : VipFeatureBase
         }
     }
 
+    private List<PostprocessingEntry>? TryGetEntries(CCSPlayerController player)
+    {
+        if (!CanUseFeature(player)) return null;
+        var entries = ReadEntries(player);
+        entries?.RemoveAll(entry => !Usable(player, entry));
+        return entries is { Count: > 0 } ? entries : null;
+    }
+
+    private PostprocessingEntry? FindEffect(CCSPlayerController player, string? name)
+    {
+        if (!PostprocessingPolicy.HasExplicitEffect(name)) return null;
+        var entries = ReadEntries(player);
+        if (entries == null) return null;
+        foreach (var entry in entries)
+            if (entry?.Name == name && Usable(player, entry))
+                return entry;
+        return null;
+    }
+
+    private static bool Usable(CCSPlayerController player, PostprocessingEntry? entry) =>
+        entry != null && !string.IsNullOrEmpty(entry.Name) && !string.IsNullOrEmpty(entry.File) && Allowed(player, entry);
+
     private static bool Allowed(CCSPlayerController player, PostprocessingEntry entry)
     {
-        if (entry.Required.Length > 0 && !AdminManager.PlayerHasPermissions(player, entry.Required))
-            return false;
-
-        return entry.Team.ToUpperInvariant() switch
+        if (!string.IsNullOrEmpty(entry.Required))
         {
-            "T" => player.TeamNum == 2,
-            "CT" => player.TeamNum == 3,
-            _ => true
-        };
+            var allowed = entry.Required[0] switch
+            {
+                '#' => AdminManager.PlayerInGroup(player, entry.Required),
+                '@' => AdminManager.PlayerHasPermissions(player, entry.Required),
+                _ => false
+            };
+            if (!allowed) return false;
+        }
+
+        if (string.Equals(entry.Team, "T", StringComparison.OrdinalIgnoreCase)) return player.TeamNum == 2;
+        if (string.Equals(entry.Team, "CT", StringComparison.OrdinalIgnoreCase)) return player.TeamNum == 3;
+        return true;
     }
 
     // ---- volume -----------------------------------------------------------------------------
 
-    private void Apply(CCSPlayerController? player)
+    private void Apply(CCSPlayerController player)
     {
-        if (_stopped || !_mapRunning || player is not { IsValid: true } || player.IsBot ||
-            player.Slot < 0 || player.Slot >= MaxPlayers) return;
-
-        Remove(player.Slot);
+        if (_stopped || !_mapRunning || !player.IsValid || player.IsBot) return;
+        var slot = player.Slot;
+        if ((uint)slot >= MaxPlayers) return;
+        _pendingApply[slot] = 0;
+        RemoveVolume(slot);
 
         var pawn = player.PlayerPawn.Value;
-        if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE) return;
-
-        var entries = TryGetEntries(player);
-        if (entries == null) return;
-
-        var entry = Current(player, entries);
-        var origin = pawn.AbsOrigin;
-        if (entry == null || origin == null) return;
+        if (pawn is not { IsValid: true } || pawn.LifeState != (byte)LifeState_t.LIFE_ALIVE ||
+            !CanUseFeature(player)) return;
 
         var prefs = Load(player);
+        var entry = FindEffect(player, prefs.Effect);
+        if (entry == null || pawn.AbsOrigin is not { } origin) return;
         var exposure = ExposureSteps[prefs.ExposureStep];
 
-        var volume = Utilities.CreateEntityByName<CPostProcessingVolume>(VolumeClass);
-        if (volume == null || !volume.IsValid || volume.Entity == null) return;
-
-        var keys = new CEntityKeyValues();
-        keys.SetString("targetname", VolumeName);
-        keys.SetString("postprocessing", entry.File);
-        // Never spawn an untracked global master, even for one frame.
-        keys.SetBool("master", false);
-        keys.SetBool("enableexposure", prefs.Exposure);
-        keys.SetFloat("fadetime", Math.Max(prefs.Fade ?? entry.Fade, 0f));
-        keys.SetFloat("minexposure", exposure.Min);
-        keys.SetFloat("maxexposure", exposure.Max);
-        keys.SetFloat("exposurespeedup", 1f);
-        keys.SetFloat("exposurespeeddown", 1f);
-        keys.SetBool("startdisabled", false);
-        keys.SetInt("spawnflags", 4097);
-        keys.SetVector("origin", origin);
-
-        _active[player.Slot] = volume;
+        uint handle = 0;
         try
         {
+            using var keys = new CEntityKeyValues();
+            keys.SetString("targetname", VolumeName);
+            keys.SetString("postprocessing", entry.File);
+            keys.SetBool("master", false);
+            keys.SetBool("enableexposure", prefs.Exposure);
+            keys.SetFloat("fadetime", Math.Max(prefs.Fade ?? entry.Fade, 0f));
+            keys.SetFloat("minexposure", exposure.Min);
+            keys.SetFloat("maxexposure", exposure.Max);
+            keys.SetFloat("exposurespeedup", 1f);
+            keys.SetFloat("exposurespeeddown", 1f);
+            keys.SetBool("startdisabled", false);
+            keys.SetInt("spawnflags", 4097);
+            keys.SetVector("origin", origin);
+
+            var volume = Utilities.CreateEntityByName<CPostProcessingVolume>(VolumeClass);
+            if (volume is not { IsValid: true }) return;
+
+            var entityHandle = volume.EntityHandle;
+            handle = entityHandle.Raw;
+            _volumes.Add(slot, handle, entityHandle.Index, prefs.Spectators, prefs.ReplaceMap);
+            _activeEntries[slot] = entry;
+            UpdateFilterRegistration();
             volume.DispatchSpawn(keys);
-            if (!volume.IsValid) { Remove(player.Slot); return; }
-            volume.AcceptInput("SetParent", pawn, null, "!activator");
-            volume.Master = true;
-            Utilities.SetStateChanged(volume, "CPostProcessingVolume", "m_bMaster");
+            // A spawn callback can retire or replace the owner's volume before DispatchSpawn returns.
+            if (_volumes.Handle(slot) != handle) return;
+            if (ResolveVolume(handle) is not { } spawned)
+            {
+                ForgetVolume(handle);
+                return;
+            }
+
+            spawned.AcceptInput("SetParent", pawn, null, "!activator");
+            if (_volumes.Handle(slot) != handle) return;
+            if (!spawned.IsValid)
+            {
+                ForgetVolume(handle);
+                return;
+            }
+            spawned.Master = true;
+            Utilities.SetStateChanged(spawned, "CPostProcessingVolume", "m_bMaster");
         }
         catch (Exception error)
         {
-            Remove(player.Slot);
+            if (handle != 0 && _volumes.Handle(slot) == handle)
+                RemoveVolume(slot);
             _plugin.Logger.LogError(error, "Postprocessing spawn failed; effect removed");
         }
-        finally { keys.Dispose(); }
     }
 
-    private void RemoveAll()
+    private void UpdateVisibility(CCSPlayerController player, Prefs prefs)
     {
-        for (var slot = 0; slot < MaxPlayers; slot++)
-            Remove(slot);
+        var slot = player.Slot;
+        if ((uint)slot < MaxPlayers)
+            _volumes.SetPreferences(slot, prefs.Spectators, prefs.ReplaceMap);
     }
 
-    private void Remove(int slot)
+    private void ClearPlayer(int slot)
     {
-        if (slot < 0 || slot >= MaxPlayers) return;
-
-        var volume = _active[slot];
-        _active[slot] = null;
-
-        if (volume is { IsValid: true } && volume.DesignerName == VolumeClass && IsOwned(volume))
-            volume.Remove();
+        if ((uint)slot >= MaxPlayers) return;
+        _pendingApply[slot] = 0;
+        RemoveVolume(slot);
     }
 
-    /// <summary>Volumes placed by the map, which can be hidden while a player's own effect is shown.</summary>
-    private void RefreshMapVolumes()
+    private void RemoveActiveVolumes()
     {
-        _mapVolumes.Clear();
-        foreach (var volume in Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass))
-            if (volume.IsValid && !IsOwned(volume))
-                _mapVolumes.Add(volume);
+        var active = _volumes.Active;
+        while (active != 0) RemoveVolume(VolumeVisibility.TakeSlot(ref active));
     }
 
-    // ---- visibility -------------------------------------------------------------------------
+    private void RemoveVolume(int slot)
+    {
+        _activeEntries[slot] = null;
+        var handle = _volumes.Handle(slot);
+        if (handle == 0) return;
 
-    /// <summary>
-    /// A player's volume is sent only to that player (and to spectators watching them, if the owner allows it);
-    /// everyone else gets it stripped from their snapshot.
-    /// </summary>
+        _volumes.Retire(handle, _volumes.Index(slot));
+        TryRemoveVolume(handle);
+    }
+
+    private static CPostProcessingVolume? ResolveVolume(uint handle)
+    {
+        var volume = new CHandle<CPostProcessingVolume>(handle).Value;
+        return volume is { IsValid: true } && volume.DesignerName == VolumeClass ? volume : null;
+    }
+
+    private void TryRemoveVolume(uint handle)
+    {
+        try
+        {
+            var volume = ResolveVolume(handle);
+            if (volume == null)
+            {
+                ForgetVolume(handle);
+                return;
+            }
+
+            // Neutralize a master before requesting engine deletion. A retiring index stays hidden.
+            try
+            {
+                if (volume.Master)
+                {
+                    volume.Master = false;
+                    Utilities.SetStateChanged(volume, "CPostProcessingVolume", "m_bMaster");
+                }
+            }
+            finally
+            {
+                if (volume.IsValid) volume.Remove();
+            }
+        }
+        catch (Exception error)
+        {
+            _plugin.Logger.LogError(error, "Postprocessing could not remove volume {Handle}", handle);
+        }
+    }
+
+    private void RetryRemovals()
+    {
+        // Remove can synchronously call OnEntityDeleted.
+        foreach (var handle in _volumes.Retiring.Keys.ToArray())
+            TryRemoveVolume(handle);
+    }
+
     private static bool IsOwned(CPostProcessingVolume volume) =>
         string.Equals(volume.Entity?.Name, VolumeName, StringComparison.Ordinal);
 
-    private void PurgeOrphans()
+    private void RefreshVolumes()
     {
+        _volumes.Map.Clear();
         foreach (var volume in Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass).ToArray())
+            TrackSpawnedVolume(volume);
+    }
+
+    private void OnEntitySpawned(CEntityInstance entity)
+    {
+        if (_mapRunning && entity.DesignerName == VolumeClass)
+            TrackSpawnedVolume(entity.As<CPostProcessingVolume>());
+    }
+
+    private void TrackSpawnedVolume(CPostProcessingVolume volume)
+    {
+        if (!volume.IsValid || volume.DesignerName != VolumeClass) return;
+        var handle = volume.EntityHandle;
+        if (_volumes.Owns(handle.Raw)) return;
+
+        if (IsOwned(volume))
         {
-            if (!volume.IsValid || !IsOwned(volume)) continue;
-            if (_active.Any(active => active is { IsValid: true } && active.Handle == volume.Handle)) continue;
-            volume.Remove();
+            _volumes.Retire(handle.Raw, handle.Index);
+            UpdateFilterRegistration();
             _purged++;
+            TryRemoveVolume(handle.Raw);
+            return;
         }
+
+        _volumes.Map[handle.Raw] = handle.Index;
+    }
+
+    private void OnEntityDeleted(CEntityInstance entity)
+    {
+        if (_volumes.NeedsFilter || _volumes.Map.Count != 0)
+            ForgetVolume(entity.EntityHandle.Raw);
+    }
+
+    private void ForgetVolume(uint handle)
+    {
+        var slot = _volumes.Forget(handle);
+        if (slot >= 0) _activeEntries[slot] = null;
+        UpdateFilterRegistration();
+    }
+
+    private void UpdateFilterRegistration()
+    {
+        var needed = _mapRunning && _volumes.NeedsFilter;
+        if (needed == _filterRegistered) return;
+        if (needed)
+            _plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        else
+            _plugin.RemoveListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        _filterRegistered = needed;
     }
 
     public string Diagnostics()
     {
-        if (!_mapRunning) return "Postprocessing 1.0.3: waiting for map";
+        if (!_mapRunning) return $"Postprocessing {VipPostprocessing.Version}: waiting for map";
         var owned = Utilities.FindAllEntitiesByDesignerName<CPostProcessingVolume>(VolumeClass)
-            .Count(volume => volume.IsValid && IsOwned(volume));
-        var active = _active.Count(volume => volume is { IsValid: true });
-        return $"Postprocessing 1.0.3: default=off active={active} owned={owned} orphan={owned - active} purged={_purged} blocked={_blocked} transmitErrors={_transmitErrors}";
+            .Count(volume => volume.IsValid && volume.DesignerName == VolumeClass && IsOwned(volume));
+        var active = System.Numerics.BitOperations.PopCount(_volumes.Active);
+        return $"Postprocessing {VipPostprocessing.Version}: default=off active={active} owned={owned} orphan={owned - active} purged={_purged} blocked={_blocked} transmitErrors={_transmitErrors} filter={(_filterRegistered ? "on" : "off")}";
+    }
+
+    private int ShownOwner(CCSPlayerController? viewer)
+    {
+        if (viewer is not { IsValid: true }) return -1;
+        var ownSlot = viewer.Slot;
+        if (_volumes.Spectatable == 0 && (_volumes.Active & VolumeVisibility.OwnerBit(ownSlot)) == 0) return -1;
+        if (viewer.PawnIsAlive) return ownSlot;
+        if (_volumes.Spectatable == 0) return -1;
+
+        var observer = viewer.Pawn.Value?.ObserverServices;
+        if (observer == null || (ObserverMode_t)observer.ObserverMode is not
+            (ObserverMode_t.OBS_MODE_IN_EYE or ObserverMode_t.OBS_MODE_CHASE)) return -1;
+        var target = observer.ObserverTarget.Value;
+        if (target is not { IsValid: true } || target.DesignerName != "player") return -1;
+        var observed = target.As<CCSPlayerPawn>().OriginalController.Value;
+        if (observed is not { IsValid: true } || observed.PlayerPawn.Raw != target.EntityHandle.Raw) return -1;
+        var slot = observed.Slot;
+        return (_volumes.Spectatable & VolumeVisibility.OwnerBit(slot)) != 0 ? slot : -1;
     }
 
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
-        if (_stopped) return;
-        foreach (var (info, viewer) in infoList)
+        var count = infoList.Count;
+        var retiring = _volumes.Retiring;
+        var mapVolumes = _volumes.Map;
+        long blocked = 0;
+        for (var i = 0; i < count; i++)
         {
+            var (info, viewer) = infoList[i];
             var shown = -1;
             try
             {
-                if (viewer is { IsValid: true } && viewer.Slot >= 0 && viewer.Slot < MaxPlayers)
-                {
-                    shown = viewer.PawnIsAlive ? viewer.Slot : -1;
-                    if (!viewer.PawnIsAlive)
-                    {
-                        // Observer targets can be entities other than a player pawn. Do not cast those.
-                        var target = viewer.Pawn.Value?.ObserverServices?.ObserverTarget.Value;
-                        if (target is { IsValid: true } && target.DesignerName == "player")
-                        {
-                            var observed = target.As<CCSPlayerPawn>().OriginalController.Value;
-                            if (observed is { IsValid: true } && observed.Slot >= 0 && observed.Slot < MaxPlayers &&
-                                _prefs.GetValueOrDefault(observed.Slot) is { Spectators: true })
-                                shown = observed.Slot;
-                        }
-                    }
-                }
+                if (_volumes.Active != 0)
+                    shown = ShownOwner(viewer);
             }
             catch (Exception)
             {
-                // An invalid observer must never abort filtering for the rest of the recipients.
-                shown = -1;
                 _transmitErrors++;
             }
 
-            for (var owner = 0; owner < MaxPlayers; owner++)
-            {
-                var volume = _active[owner];
-                if (volume is not { IsValid: true }) continue;
-                if (PostprocessingPolicy.CanTransmit(owner, shown)) continue;
-                info.TransmitEntities.Remove((int)volume.Index);
-                _blocked++;
-            }
-            if (shown < 0 || _active[shown] is not { IsValid: true } ||
-                _prefs.GetValueOrDefault(shown) is not { ReplaceMap: true }) continue;
-            foreach (var mapVolume in _mapVolumes)
-                if (mapVolume.IsValid) info.TransmitEntities.Remove((int)mapVolume.Index);
+            var hidden = _volumes.HiddenOwners(shown);
+            blocked += System.Numerics.BitOperations.PopCount(hidden) + retiring.Count;
+            while (hidden != 0)
+                info.TransmitEntities.Remove(_volumes.Index(VolumeVisibility.TakeSlot(ref hidden)));
+            if (retiring.Count != 0)
+                foreach (var index in retiring.Values)
+                    info.TransmitEntities.Remove(index);
+            if (_volumes.HideMap(shown))
+                foreach (var index in mapVolumes.Values)
+                    info.TransmitEntities.Remove(index);
         }
+        _blocked += blocked;
     }
 }
