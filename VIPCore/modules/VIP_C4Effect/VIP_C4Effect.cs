@@ -63,7 +63,7 @@ public class VipC4Effect : BasePlugin
         if (_api == null || _feature != null) return;
         _feature = new C4Effect(this, _api);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
-        _feature.RestorePlayers();
+        _feature.SchedulePlayerRestore();
     }
 
     private void StopRetry()
@@ -257,11 +257,7 @@ public class C4Effect : VipFeatureBase
         plugin.RegisterListener<Listeners.OnMapStart>(_ =>
         {
             ResetMap();
-            var generation = _mapGeneration;
-            Server.NextWorldUpdate(() =>
-            {
-                if (!_stopped && generation == _mapGeneration) RestorePlayers();
-            });
+            SchedulePlayerRestore();
         });
         plugin.RegisterListener<Listeners.OnClientPutInServer>(slot =>
         {
@@ -271,7 +267,17 @@ public class C4Effect : VipFeatureBase
         plugin.RegisterListener<Listeners.OnClientDisconnectPost>(ForgetViewer);
     }
 
-    internal void RestorePlayers()
+    internal void SchedulePlayerRestore()
+    {
+        // OnAllPluginsLoaded can run before CSS's game globals are initialized.
+        var generation = _mapGeneration;
+        Server.NextWorldUpdate(() =>
+        {
+            if (!_stopped && generation == _mapGeneration) RestorePlayers();
+        });
+    }
+
+    private void RestorePlayers()
     {
         foreach (var player in Utilities.GetPlayers())
             if (player.IsValid && ValidSlot(player.Slot))

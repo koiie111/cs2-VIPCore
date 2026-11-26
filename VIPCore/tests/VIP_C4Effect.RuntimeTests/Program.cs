@@ -263,7 +263,9 @@ internal sealed class Fixture : IDisposable
     {
         BasePlugin.Instance = Plugin;
         Plugin.Load(true);
+        var walks = Utilities.PlayerWalks;
         Plugin.OnAllPluginsLoaded(true);
+        Require(Utilities.PlayerWalks == walks, "Plugin startup leaves native player lookup to world update");
         Server.Advance();
     }
 
