@@ -420,6 +420,12 @@ public class C4Effect : VipFeatureBase
             menu.AddMenuOption(entry.Name, (controller, _) =>
             {
                 if (!CanEdit(controller)) return;
+                // A group change or config reload can retire an option while this menu is open.
+                if (!GetEntries(controller).Exists(current => current.Defuse == defuse && current.Name == entry.Name))
+                {
+                    OnSelectItem(controller, state: FeatureState.Enabled);
+                    return;
+                }
                 var prefs = Load(controller);
                 Set(prefs, defuse, entry.Name);
                 Save(controller, prefs);
@@ -564,6 +570,7 @@ public class C4Effect : VipFeatureBase
     {
         var generation = ++_plantGeneration;
         _bomb = null;
+        RemovePlant();
         var planter = ev.Userid;
         var entry = Pick(planter, false, out var prefs);
         if (entry == null) return HookResult.Continue;
@@ -580,7 +587,6 @@ public class C4Effect : VipFeatureBase
             if (bomb?.AbsOrigin is not { } origin) return;
 
             _bomb = new CHandle<CPlantedC4>(bomb.EntityHandle.Raw);
-            if (_plant is { } previous) Remove(previous, refresh: false);
             var particle = Spawn(entry.Particle, new Vector(origin.X, origin.Y, origin.Z), bomb);
             if (particle != null)
             {
@@ -606,7 +612,8 @@ public class C4Effect : VipFeatureBase
         }
 
         var origin = (_plant is { } plant ? Resolve(plant)?.AbsOrigin : null)
-            ?? (bomb is null ? FindBomb()?.AbsOrigin : bomb.Value?.AbsOrigin)
+            ?? bomb?.Value?.AbsOrigin
+            ?? FindBomb()?.AbsOrigin
             ?? defuser!.PlayerPawn.Value?.AbsOrigin;
         var position = origin == null ? null : new Vector(origin.X, origin.Y, origin.Z + 10f);
         if (_plant is { } previous) Remove(previous, refresh: false);
@@ -720,6 +727,12 @@ public class C4Effect : VipFeatureBase
         var slot = player.Slot;
         if (_stopped || !ValidSlot(slot)) return;
         var bit = 1UL << slot;
+        // Fake players do not receive snapshots. An HLTV relay can also carry the fake-client flag.
+        if (player.IsBot && !player.IsHLTV)
+        {
+            if ((_present & bit) != 0) ForgetViewer(slot);
+            return;
+        }
         var handle = player.EntityHandle.Raw;
         ref var viewer = ref _viewers[slot];
         if ((_present & bit) == 0 || viewer.Controller != handle)

@@ -95,6 +95,27 @@ using (var qa = new Fixture())
     Fixture.Require(replacement.IsValid && !qa.Filtering, "Cleanup preserves unrelated entity");
 }
 
+using (var qa = new Fixture())
+{
+    var owner = qa.Connect(0, 2, """{"m":1}""");
+    var bot = qa.Connect(1, 3, bot: true);
+    var particle = qa.Plant(owner);
+    qa.Team(bot, 1);
+    Fixture.Require(!qa.Filtering, "Bots alone never require a network filter");
+    qa.Restart();
+    particle = qa.Plant(owner);
+    Fixture.Require(!qa.Filtering, "Restoring bots does not subscribe CheckTransmit");
+    var relay = qa.Connect(2, 1, vip: false, bot: true, hltv: true);
+    Fixture.Require(qa.Filtering && !qa.Visible(particle, relay), "HLTV remains a network recipient");
+    qa.Disconnect(relay);
+    var enemy = qa.Connect(2, 3, vip: false);
+    Fixture.Require(qa.Filtering && !qa.Visible(particle, enemy), "Enemy joining mid-effect is filtered");
+    qa.Disconnect(enemy);
+    Fixture.Require(!qa.Filtering, "Last hidden recipient left");
+    qa.Plugin.Fire(new EventBombPlanted(bot));
+    Fixture.Require(!particle.IsValid && qa.Particles.Length == 0, "A new plant retires the previous effect");
+}
+
 foreach (var canceledBy in new[] { "defuse", "explosion", "round", "map", "unload", "second plant" })
 {
     using var qa = new Fixture();
@@ -149,6 +170,14 @@ using (var qa = new Fixture())
     Fixture.Require(Utilities.Searches == checks + 1 &&
         qa.Particles.Single().AbsOrigin == new Vector(1, 2, 13), "Defuse reuses known bomb handle");
     qa.Plugin.Fire(new EventRoundStart());
+    qa.Plant(owner).Remove();
+    qa.Bomb.Remove();
+    var newBomb = new CPlantedC4 { EntityHandle = new(98 + 0x8000), DesignerName = "planted_c4",
+        AbsOrigin = new Vector(1, 2, 3) };
+    qa.Plugin.Fire(new EventBombDefused(defuser));
+    Fixture.Require(Utilities.Searches == checks + 3 &&
+        qa.Particles.Single().AbsOrigin == new Vector(1, 2, 13), "Defuse locates replacement for stale bomb handle");
+    qa.Plugin.Fire(new EventRoundStart());
     qa.Plant(owner);
     var searches = Utilities.Searches;
     qa.Plugin.Fire(new EventBombDefused(guest));
@@ -157,7 +186,7 @@ using (var qa = new Fixture())
     Fixture.Require(qa.Particles.Single().AbsOrigin == new Vector(1, 2, 13), "Bomb lookup fallback");
     timer.FireStale();
     Fixture.Require(qa.Particles.Length == 1, "Stale timer preserves new effect");
-    qa.Bomb.Remove();
+    newBomb.Remove();
     qa.Plugin.Fire(new EventBombDefused(defuser));
     Fixture.Require(qa.Particles.Any(effect => effect.AbsOrigin == new Vector(7, 8, 19)), "Pawn fallback");
 }
@@ -174,7 +203,12 @@ using (var qa = new Fixture(notifying: true))
     qa.OpenMenu(owner);
     Fixture.Require(parsed == qa.Api.Deserializations, "Group config cached");
     qa.Api.Entries["Test"] = """[null,{"name":null},{"name":"broken","particle":42},{"name":"new","particle":"new.vpcf","lifetime":5}]""";
+    qa.Menu(owner, "c4effect.Plant");
+    var oldMenu = qa.Api.Menu!;
     ((NotifyingApi)qa.Api).Reload();
+    oldMenu.Click(owner, "P");
+    Fixture.Require(!qa.Api.Cookies.ContainsKey(owner.SteamID) && qa.Api.Menu != oldMenu,
+        "An obsolete menu option cannot overwrite preferences after reload");
     Fixture.Require(qa.Plant(owner).EffectName == "new.vpcf", "Reload invalidates group cache");
     Fixture.Require(qa.Plugin.Timers.Single().Interval == 5f, "Configured lifetime");
     qa.Api.Entries["Second"] = """[{"name":"Other","particle":"other.vpcf"}]""";
@@ -278,12 +312,13 @@ internal sealed class Fixture : IDisposable
         Start();
     }
 
-    internal CCSPlayerController Connect(int slot, int team, string? cookie = null, bool vip = true, bool bot = false)
+    internal CCSPlayerController Connect(int slot, int team, string? cookie = null, bool vip = true, bool bot = false,
+        bool hltv = false)
     {
         var identity = Utilities.NextEntity++;
         var pawn = new Pawn { EntityHandle = new(Utilities.NextEntity++), AbsOrigin = new(7, 8, 9) };
         var player = new CCSPlayerController { Slot = slot, EntityHandle = new(identity), SteamID = identity,
-            TeamNum = team, IsBot = bot,
+            TeamNum = team, IsBot = bot, IsHLTV = hltv,
             PlayerPawn = new(pawn.EntityHandle.Raw) };
         Utilities.Players[slot] = player;
         Plugin.Invoke<Listeners.OnClientPutInServer>(call => call(slot));
