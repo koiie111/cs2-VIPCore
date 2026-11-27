@@ -1,6 +1,7 @@
 {
   "buyteamweapon.round_start": "Waffen des Gegners: {0}",
   "buyteamweapon.in_buy_zone": "Du musst in der Kaufzone sein.",
+  "buyteamweapon.buy_time_ended": "Die Kaufzeit ist abgelaufen.",
   "buyteamweapon.no_money": "Du hast nicht genug Geld.",
   "buyteamweapon.wait_for_spawn": "Warte auf die Spawn-Boni und versuche es erneut.",
   "buyteamweapon.give_failed": "Die Waffe konnte nicht ausgegeben werden. Es wurde kein Geld abgezogen."

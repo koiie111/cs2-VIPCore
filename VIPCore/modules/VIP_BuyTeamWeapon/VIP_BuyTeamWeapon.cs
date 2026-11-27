@@ -174,6 +174,19 @@ public class BuyTeamWeapon : VipFeatureBase
             return;
         }
 
+        var gameRules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
+            .FirstOrDefault(proxy => proxy.IsValid)?.GameRules;
+        if (gameRules is null)
+        {
+            PrintToChat(player, _plugin.Localizer["buyteamweapon.give_failed"]);
+            return;
+        }
+        if (gameRules.BuyTimeEnded)
+        {
+            PrintToChat(player, _plugin.Localizer["buyteamweapon.buy_time_ended"]);
+            return;
+        }
+
         var moneyServices = player.InGameMoneyServices;
         if (moneyServices is null) return;
 

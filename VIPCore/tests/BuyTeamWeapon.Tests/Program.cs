@@ -55,6 +55,8 @@ foreach (var (command, entity, _, price) in catalog)
     var plugin = new BasePlugin();
     var player = new CCSPlayerController { Team = team };
     var feature = new BuyTeamWeapon(plugin, api, false);
+    var rules = new CCSGameRules();
+    Utilities.GameRulesProxy = new() { GameRules = rules };
     var money = player.InGameMoneyServices!;
     var pawn = player.PlayerPawn.Value!;
     string scenario = $"{team} !{command} MoneyFirst={moneyFirst}";
@@ -88,32 +90,48 @@ foreach (var (command, entity, _, price) in catalog)
     Buy();
     Check(player.Given == 2 && money.Account == 0, $"{scenario}, exact funds");
 
+    rules.BuyTimeEnded = true;
+    NoPurchase(10000, 2, "buy time ended inside buy zone");
+    Check(player.Chat.Last() == "Время закупки закончилось.", "buy time ended message");
+
+    Utilities.GameRulesProxy = null;
+    NoPurchase(10000, 2, "game rules proxy absent");
+    Utilities.GameRulesProxy = new();
+    NoPurchase(10000, 2, "game rules absent");
+    Utilities.GameRulesProxy = new() { IsValid = false, GameRules = new() };
+    NoPurchase(10000, 2, "game rules proxy invalid");
+
+    Utilities.GameRulesProxy = new() { GameRules = new() };
+    plugin.RoundStart(new());
+    Buy();
+    Check(player.Given == 3 && money.Account == 10000 - price, $"{scenario}, buy window open in next round");
+
     player.RejectWeapon = true;
-    NoPurchase(price, 2, "engine rejected weapon");
+    NoPurchase(price, 3, "engine rejected weapon");
     Check(player.Chat.Last() == "Оружие не выдано. Деньги не списаны.", "failure message");
     player.RejectWeapon = false;
     pawn.InBuyZone = false;
-    NoPurchase(10000, 2, "outside buy zone");
+    NoPurchase(10000, 3, "outside buy zone");
     pawn.InBuyZone = true;
     player.PawnIsAlive = false;
-    NoPurchase(10000, 2, "dead");
+    NoPurchase(10000, 3, "dead");
     player.PawnIsAlive = true;
     player.IsVip = false;
-    NoPurchase(10000, 2, "no VIP status");
+    NoPurchase(10000, 3, "no VIP status");
     player.IsVip = true;
     player.HasFeature = false;
-    NoPurchase(10000, 2, "feature absent");
+    NoPurchase(10000, 3, "feature absent");
     player.HasFeature = true;
     player.FeatureEnabled = false;
-    NoPurchase(10000, 2, "feature disabled");
+    NoPurchase(10000, 3, "feature disabled");
     player.FeatureEnabled = true;
 
     plugin.Spawn(new() { Userid = player });
-    NoPurchase(10000, 2, "repeat spawn");
+    NoPurchase(10000, 3, "repeat spawn");
     api.Spawn(player);
     feature.Stop();
     Server.Drain();
-    NoPurchase(10000, 2, "module unloaded");
+    NoPurchase(10000, 3, "module unloaded");
     Check(api.Subscribers == 0, "API subscriptions removed");
 }
 
@@ -162,6 +180,8 @@ namespace CounterStrikeSharp.API.Core {
  public enum HookResult{Continue} public enum HookMode{Pre,Post}
  public class GameEventInfo{}
  public class EventRoundStart{}
+ public class CCSGameRules {public bool BuyTimeEnded {get;set;}}
+ public class CCSGameRulesProxy {public bool IsValid {get;set;} = true; public CCSGameRules? GameRules {get;set;}}
  public class EventPlayerSpawn{public CCSPlayerController? Userid{get;set;}}
  public static class Listeners {public delegate void OnClientDisconnectPost(int slot);}
  public class BasePlugin {
@@ -200,7 +220,11 @@ namespace CounterStrikeSharp.API.Core {
 }
 namespace CounterStrikeSharp.API {
  using CounterStrikeSharp.API.Core;
- public static class Utilities {public static string LastSchema="";public static bool FailGetPlayers; public static List<CCSPlayerController> Players = new(); public static List<CCSPlayerController> GetPlayers()=>FailGetPlayers ? throw new Exception("Global Variables not initialized yet") : Players;public static void SetStateChanged(CCSPlayerController p,string c,string f)=>LastSchema=c+"."+f;}
+ public static class Utilities {
+ public static CCSGameRulesProxy? GameRulesProxy;
+ public static IEnumerable<T> FindAllEntitiesByDesignerName<T>(string designerName) =>
+     designerName == "cs_gamerules" && GameRulesProxy is T proxy ? [proxy] : [];
+ public static string LastSchema="";public static bool FailGetPlayers; public static List<CCSPlayerController> Players = new(); public static List<CCSPlayerController> GetPlayers()=>FailGetPlayers ? throw new Exception("Global Variables not initialized yet") : Players;public static void SetStateChanged(CCSPlayerController p,string c,string f)=>LastSchema=c+"."+f;}
  public static class Server {static Queue<Action> q=new();public static void NextFrame(Action f)=>q.Enqueue(f); public static void Drain(){while(q.TryDequeue(out var f))f();}}
 }
 namespace VipCoreApi {
