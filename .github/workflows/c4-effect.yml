@@ -1,0 +1,33 @@
+name: C4Effect checks
+
+on:
+  pull_request:
+    paths:
+      - 'VIPCore/modules/VIP_C4Effect/**'
+      - 'VIPCore/tests/VIP_C4Effect.RuntimeTests/**'
+      - 'VIPCore/VipCoreApi/**'
+      - 'VIPCore/VipCoreApi.dll'
+      - 'VIPCore/VIPCore/**'
+      - '.github/workflows/c4-effect.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build against bundled API
+        run: dotnet build VIPCore/modules/VIP_C4Effect -c Release -warnaserror
+      - name: Publish against release API
+        run: |
+          dotnet publish VIPCore/VipCoreApi -c Release -o "$RUNNER_TEMP/vip-api"
+          cp "$RUNNER_TEMP/vip-api/VipCoreApi.dll" VIPCore/VipCoreApi.dll
+          dotnet clean VIPCore/modules/VIP_C4Effect -c Release
+          dotnet publish VIPCore/modules/VIP_C4Effect -c Release -warnaserror
+      - name: Verify visibility and lifecycle
+        run: dotnet run --project VIPCore/tests/VIP_C4Effect.RuntimeTests -c Release

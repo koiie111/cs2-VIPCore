@@ -6,6 +6,7 @@ using CounterStrikeSharp.API.Core.Capabilities;
 using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using Microsoft.Extensions.Logging;
+using Timer = CounterStrikeSharp.API.Modules.Timers.Timer;
 using VipCoreApi;
 using static VipCoreApi.IVipCoreApi;
 
@@ -15,11 +16,13 @@ public class VipC4Effect : BasePlugin
 {
     public override string ModuleAuthor => "ByDexterTR (original), ported for cs2-VIPCore";
     public override string ModuleName => "[VIP] C4 Effect";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
     public override string ModuleDescription => "Selectable particle effects for planting and defusing the bomb";
 
     private C4Effect? _feature;
     private IVipCoreApi? _api;
+    private Timer? _retry;
+    private bool _unloaded;
     private PluginCapability<IVipCoreApi> PluginCapability { get; } = new("vipcore:core");
 
     public override void Load(bool hotReload)
@@ -33,9 +36,23 @@ public class VipC4Effect : BasePlugin
 
     private void Initialize()
     {
-        if (_api != null) return;
-        _api = PluginCapability.Get();
-        if (_api == null) return;
+        if (_unloaded || _api != null) return;
+        try
+        {
+            _api = PluginCapability.Get();
+        }
+        catch (KeyNotFoundException)
+        {
+            // Older CSS builds throw while the capability has no provider.
+        }
+
+        if (_api == null)
+        {
+            _retry ??= AddTimer(5f, Initialize, TimerFlags.REPEAT);
+            return;
+        }
+
+        StopRetry();
         _api.OnCoreReady += RegisterFeature;
         // The core-ready event has already fired when loading this module on a live server.
         RegisterFeature();
@@ -46,10 +63,21 @@ public class VipC4Effect : BasePlugin
         if (_api == null || _feature != null) return;
         _feature = new C4Effect(this, _api);
         _api.RegisterFeature(_feature, FeatureType.Selectable);
+        _feature.SchedulePlayerRestore();
+    }
+
+    private void StopRetry()
+    {
+        if (_retry == null) return;
+        _retry.Kill();
+        Timers.Remove(_retry);
+        _retry = null;
     }
 
     public override void Unload(bool hotReload)
     {
+        _unloaded = true;
+        StopRetry();
         if (_api == null) return;
         _api.OnCoreReady -= RegisterFeature;
         if (_feature == null) return;
@@ -74,19 +102,22 @@ public class VipC4Effect : BasePlugin
             using var doc = JsonDocument.Parse(File.ReadAllText(path),
                 new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
 
-            if (!doc.RootElement.TryGetProperty("Groups", out var groups) || groups.ValueKind != JsonValueKind.Object)
+            if (doc.RootElement.ValueKind != JsonValueKind.Object ||
+                !doc.RootElement.TryGetProperty("Groups", out var groups) || groups.ValueKind != JsonValueKind.Object)
                 return;
 
             var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var group in groups.EnumerateObject())
             {
-                if (!group.Value.TryGetProperty("Values", out var values) ||
+                if (group.Value.ValueKind != JsonValueKind.Object ||
+                    !group.Value.TryGetProperty("Values", out var values) || values.ValueKind != JsonValueKind.Object ||
                     !values.TryGetProperty(C4Effect.FeatureName, out var entries) ||
                     entries.ValueKind != JsonValueKind.Array)
                     continue;
 
                 foreach (var entry in entries.EnumerateArray())
-                    if (entry.TryGetProperty("particle", out var file) && file.GetString() is { Length: > 0 } name)
+                    if (entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("particle", out var file) &&
+                        file.ValueKind == JsonValueKind.String && file.GetString() is { Length: > 0 } name)
                         files.Add(name);
             }
 
@@ -148,96 +179,179 @@ public class C4Effect : VipFeatureBase
         [JsonPropertyName("s")] public bool SeeOwn { get; set; } = true;
     }
 
-    /// <summary>A spawned particle with the visibility rules of its owner, fixed at spawn time.</summary>
-    private class Spawned
+    private sealed class Spawned(CHandle<CParticleSystem> handle, int owner, MineMode mine, bool seeOwn)
     {
-        public CParticleSystem Particle = null!;
-        public int Owner;
-        public MineMode Mine;
-        public bool SeeOwn;
+        public CHandle<CParticleSystem> Handle { get; } = handle;
+        public int Index { get; } = (int)handle.Index;
+        public int Owner = owner;
+        public MineMode Mine { get; } = mine;
+        public bool SeeOwn { get; } = seeOwn;
+        public ulong Hidden;
+        public Timer? Timer;
+    }
+
+    private struct Viewer
+    {
+        public uint Controller;
+        public ulong Connection;
+        public int Team;
+        public Prefs? Prefs;
     }
 
     public override string Feature => FeatureName;
 
     private readonly BasePlugin _plugin;
-    private readonly Dictionary<int, Prefs> _prefs = new();
+    private readonly Viewer[] _viewers = new Viewer[MaxPlayers];
     private readonly List<Spawned> _active = new();
-    private readonly int[] _team = new int[MaxPlayers];
+    private readonly Dictionary<string, List<C4EffectEntry>>? _groupEntries;
+    private readonly System.Reflection.EventInfo? _reloadEvent;
+    private readonly Action? _reloadHandler;
+    private ulong _present;
+    private ulong _hidden;
+    private ulong _connection;
+    private uint _plantGeneration;
+    private uint _mapGeneration;
+    private CHandle<CPlantedC4>? _bomb;
     private Spawned? _plant;
+    private bool _transmitRegistered;
+    private bool _deleteRegistered;
+    private bool _deleteSyncPending;
     private bool _stopped;
 
     public C4Effect(BasePlugin plugin, IVipCoreApi api) : base(api)
     {
         _plugin = plugin;
 
+        // The bundled reference DLL predates IVipConfigReloadApi.
+        _reloadEvent = api.GetType().GetEvent("ConfigReloaded");
+        if (_reloadEvent?.EventHandlerType == typeof(Action))
+        {
+            _groupEntries = new(StringComparer.Ordinal);
+            _reloadHandler = _groupEntries.Clear;
+            _reloadEvent.AddEventHandler(api, _reloadHandler);
+        }
+
         plugin.RegisterEventHandler<EventBombPlanted>(OnPlanted);
         plugin.RegisterEventHandler<EventBombDefused>(OnDefused);
         plugin.RegisterEventHandler<EventBombExploded>((_, _) =>
         {
+            _plantGeneration++;
+            _bomb = null;
             RemovePlant();
             return HookResult.Continue;
         });
         plugin.RegisterEventHandler<EventRoundStart>((_, _) =>
         {
+            _plantGeneration++;
+            _bomb = null;
             RemoveAll();
             return HookResult.Continue;
         });
-        plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+        plugin.RegisterEventHandler<EventPlayerTeam>((ev, _) =>
+        {
+            if (!ev.Disconnect && ev.Userid is { IsValid: true } player)
+                UpdateViewer(player, ev.Team);
+            return HookResult.Continue;
+        });
+        plugin.RegisterListener<Listeners.OnMapEnd>(ResetMap);
         plugin.RegisterListener<Listeners.OnMapStart>(_ =>
         {
-            _active.Clear();
-            _plant = null;
+            ResetMap();
+            SchedulePlayerRestore();
         });
-        plugin.RegisterListener<Listeners.OnClientDisconnectPost>(slot =>
+        plugin.RegisterListener<Listeners.OnClientPutInServer>(slot =>
         {
-            _prefs.Remove(slot);
-            // The slot can be taken over by another player while the effect is still running.
-            foreach (var spawned in _active)
-                if (spawned.Owner == slot)
-                    spawned.Owner = -1;
+            if (ValidSlot(slot) && Utilities.GetPlayerFromSlot(slot) is { IsValid: true } player)
+                UpdateViewer(player, player.TeamNum);
+        });
+        plugin.RegisterListener<Listeners.OnClientDisconnectPost>(ForgetViewer);
+    }
+
+    internal void SchedulePlayerRestore()
+    {
+        // OnAllPluginsLoaded can run before CSS's game globals are initialized.
+        var generation = _mapGeneration;
+        Server.NextWorldUpdate(() =>
+        {
+            if (!_stopped && generation == _mapGeneration) RestorePlayers();
         });
     }
 
-    /// <summary>Called on plugin unload; CounterStrikeSharp drops handlers and listeners itself.</summary>
+    private void RestorePlayers()
+    {
+        foreach (var player in Utilities.GetPlayers())
+            if (player.IsValid && ValidSlot(player.Slot))
+            {
+                if (!player.IsBot && !player.IsHLTV && IsClientVip(player))
+                    OnPlayerLoaded(player, "");
+                else
+                    UpdateViewer(player, player.TeamNum);
+            }
+    }
+
     public void Stop()
     {
+        if (_stopped) return;
         _stopped = true;
+        Api.OnPlayerSpawn -= OnPlayerSpawn;
+        Api.PlayerLoaded -= OnPlayerLoaded;
+        Api.PlayerRemoved -= OnPlayerRemoved;
+        if (_reloadHandler != null) _reloadEvent!.RemoveEventHandler(Api, _reloadHandler);
+        _groupEntries?.Clear();
+        ResetMap();
+    }
+
+    private void ResetMap()
+    {
+        _mapGeneration++;
+        _plantGeneration++;
+        _bomb = null;
         RemoveAll();
-        _prefs.Clear();
+        _present = 0;
+        Array.Clear(_viewers);
     }
 
     public override void OnPlayerLoaded(CCSPlayerController player, string group)
     {
-        if (!_stopped) _prefs.Remove(player.Slot);
+        if (_stopped || !player.IsValid || !ValidSlot(player.Slot) || player.IsBot || player.IsHLTV) return;
+        UpdateViewer(player, player.TeamNum, ReadPrefs(player), replacePrefs: true);
     }
 
-    public override void OnPlayerRemoved(CCSPlayerController player, string group) => _prefs.Remove(player.Slot);
+    public override void OnPlayerRemoved(CCSPlayerController player, string group)
+    {
+        if (_stopped || !player.IsValid) return;
+        var slot = player.Slot;
+        if (ValidSlot(slot) && _viewers[slot].Controller == player.EntityHandle.Raw)
+            UpdateViewer(player, player.TeamNum, replacePrefs: true);
+    }
 
     // ---- menu -------------------------------------------------------------------------------
 
     public override void OnSelectItem(CCSPlayerController player, FeatureState state)
     {
-        if (_stopped) return;
+        if (_stopped || !player.IsValid || !ValidSlot(player.Slot)) return;
 
         var prefs = Load(player);
-        var plant = TryGetEntries(player, false);
-        var defuse = TryGetEntries(player, true);
+        var entries = HasAccess(player) ? GetEntries(player) : null;
+        var plant = Current(entries, prefs.Plant, false, honorOff: false);
+        var defuse = Current(entries, prefs.Defuse, true, honorOff: false);
         var menu = CreateMenu(GetTranslatedText(Feature));
 
         if (plant != null)
-            menu.AddMenuOption(GetTranslatedText("c4effect.Plant", Name(Current(player, plant, false))),
-                (controller, _) => OpenEffects(controller, false, state));
+            menu.AddMenuOption(GetTranslatedText("c4effect.Plant", Name(prefs.Plant == Off ? null : plant)),
+                (controller, _) => OpenEffects(controller, false));
 
         if (defuse != null)
-            menu.AddMenuOption(GetTranslatedText("c4effect.Defuse", Name(Current(player, defuse, true))),
-                (controller, _) => OpenEffects(controller, true, state));
+            menu.AddMenuOption(GetTranslatedText("c4effect.Defuse", Name(prefs.Defuse == Off ? null : defuse)),
+                (controller, _) => OpenEffects(controller, true));
 
         // Settings cycle on click and reopen the menu so the new value is shown.
         menu.AddMenuOption(GetTranslatedText("c4effect.Self", YesNo(prefs.SeeOwn)), (controller, _) =>
         {
+            if (!CanEdit(controller)) return;
             var p = Load(controller);
             p.SeeOwn = !p.SeeOwn;
-            Save(controller);
+            Save(controller, p);
             OnSelectItem(controller, state);
         });
 
@@ -245,9 +359,10 @@ public class C4Effect : VipFeatureBase
             GetTranslatedText("c4effect.Mine", GetTranslatedText($"c4effect.mine.{prefs.Mine}")),
             (controller, _) =>
             {
+                if (!CanEdit(controller)) return;
                 var p = Load(controller);
                 p.Mine = (MineMode)(((int)p.Mine + 1) % 3);
-                Save(controller);
+                Save(controller, p);
                 OnSelectItem(controller, state);
             });
 
@@ -256,48 +371,64 @@ public class C4Effect : VipFeatureBase
             GetTranslatedText("c4effect.Others", GetTranslatedText($"c4effect.others.{prefs.Others}")),
             (controller, _) =>
             {
+                if (!CanEdit(controller)) return;
                 var p = Load(controller);
                 p.Others = (OthersMode)(((int)p.Others + 1) % 3);
-                Save(controller);
+                Save(controller, p);
                 OnSelectItem(controller, state);
             });
 
         menu.AddMenuOption(GetTranslatedText("c4effect.Reset"), (controller, _) =>
         {
+            if (!CanEdit(controller)) return;
             var p = Load(controller);
             p.Plant = null;
             p.Defuse = null;
             p.Mine = MineMode.All;
             p.Others = OthersMode.All;
             p.SeeOwn = true;
-            Save(controller);
+            Save(controller, p);
             OnSelectItem(controller, state);
         });
 
         menu.Open(player);
     }
 
-    private void OpenEffects(CCSPlayerController player, bool defuse, FeatureState state)
+    private void OpenEffects(CCSPlayerController player, bool defuse)
     {
-        var entries = TryGetEntries(player, defuse);
-        if (entries == null) return;
+        if (!CanEdit(player)) return;
+        var entries = GetEntries(player);
+        var prefs = Load(player);
+        var saved = defuse ? prefs.Defuse : prefs.Plant;
+        if (Current(entries, saved, defuse, honorOff: false) == null) return;
 
-        var current = Current(player, entries, defuse)?.Name ?? Off;
+        var current = Current(entries, saved, defuse)?.Name ?? Off;
         var menu = CreateMenu(GetTranslatedText(defuse ? "c4effect.SelectDefuse" : "c4effect.SelectPlant"));
 
         menu.AddMenuOption(GetTranslatedText("c4effect.Disable"), (controller, _) =>
         {
-            Set(Load(controller), defuse, Off);
-            Save(controller);
+            if (!CanEdit(controller)) return;
+            var prefs = Load(controller);
+            Set(prefs, defuse, Off);
+            Save(controller, prefs);
             PrintToChat(controller, GetTranslatedText(defuse ? "c4effect.DefuseOff" : "c4effect.PlantOff"));
         }, current == Off);
 
         foreach (var entry in entries)
         {
+            if (entry.Defuse != defuse) continue;
             menu.AddMenuOption(entry.Name, (controller, _) =>
             {
-                Set(Load(controller), defuse, entry.Name);
-                Save(controller);
+                if (!CanEdit(controller)) return;
+                // A group change or config reload can retire an option while this menu is open.
+                if (!GetEntries(controller).Exists(current => current.Defuse == defuse && current.Name == entry.Name))
+                {
+                    OnSelectItem(controller, state: FeatureState.Enabled);
+                    return;
+                }
+                var prefs = Load(controller);
+                Set(prefs, defuse, entry.Name);
+                Save(controller, prefs);
                 PrintToChat(controller,
                     GetTranslatedText(defuse ? "c4effect.DefuseOn" : "c4effect.PlantOn", entry.Name));
             }, current == entry.Name);
@@ -318,10 +449,23 @@ public class C4Effect : VipFeatureBase
 
     // ---- settings ---------------------------------------------------------------------------
 
+    private static bool ValidSlot(int slot) => (uint)slot < MaxPlayers;
+
+    private bool CanEdit(CCSPlayerController player) =>
+        !_stopped && player.IsValid && ValidSlot(player.Slot) && HasAccess(player);
+
     private Prefs Load(CCSPlayerController player)
     {
-        if (_prefs.TryGetValue(player.Slot, out var cached)) return cached;
+        ref var viewer = ref _viewers[player.Slot];
+        if (viewer.Controller == player.EntityHandle.Raw && viewer.Prefs is { } cached) return cached;
 
+        var prefs = ReadPrefs(player);
+        UpdateViewer(player, player.TeamNum, prefs, replacePrefs: true);
+        return prefs;
+    }
+
+    private Prefs ReadPrefs(CCSPlayerController player)
+    {
         var loaded = new Prefs();
         var raw = GetPlayerCookie<string>(player.SteamID, CookieKey);
         if (!string.IsNullOrEmpty(raw))
@@ -339,134 +483,153 @@ public class C4Effect : VipFeatureBase
         if (!Enum.IsDefined(loaded.Mine)) loaded.Mine = MineMode.All;
         if (!Enum.IsDefined(loaded.Others)) loaded.Others = OthersMode.All;
 
-        _prefs[player.Slot] = loaded;
         return loaded;
     }
 
-    private void Save(CCSPlayerController player) =>
-        SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(Load(player), PrefsJson));
-
-    /// <summary>
-    /// The entry the player picked if the group still offers it, otherwise the first entry of the category
-    /// (so a fresh VIP gets an effect without opening the menu). Null when disabled.
-    /// </summary>
-    private C4EffectEntry? Current(CCSPlayerController player, List<C4EffectEntry> entries, bool defuse)
+    private void Save(CCSPlayerController player, Prefs prefs)
     {
-        var prefs = Load(player);
-        var saved = defuse ? prefs.Defuse : prefs.Plant;
-        if (saved == Off) return null;
-        return entries.FirstOrDefault(e => e.Name == saved) ?? entries.FirstOrDefault();
+        SetPlayerCookie(player.SteamID, CookieKey, JsonSerializer.Serialize(prefs, PrefsJson));
+        RefreshViewer(player.Slot);
     }
 
-    /// <summary>Effects of the player's group for one category; null when the player has none.</summary>
-    private List<C4EffectEntry>? TryGetEntries(CCSPlayerController player, bool defuse)
+    private static C4EffectEntry? Current(List<C4EffectEntry>? entries, string? saved, bool defuse,
+        bool honorOff = true)
     {
-        if (!IsClientVip(player) || !PlayerHasFeature(player)) return null;
-        if (GetPlayerFeatureState(player) is not FeatureState.Enabled) return null;
+        if (entries == null || (honorOff && saved == Off)) return null;
+        C4EffectEntry? first = null;
+        foreach (var entry in entries)
+        {
+            if (entry.Defuse != defuse) continue;
+            first ??= entry;
+            if (entry.Name == saved) return entry;
+        }
+        return first;
+    }
+
+    private bool HasAccess(CCSPlayerController player) =>
+        IsClientVip(player) && PlayerHasFeature(player) && GetPlayerFeatureState(player) == FeatureState.Enabled;
+
+    private List<C4EffectEntry> GetEntries(CCSPlayerController player)
+    {
+        var group = _groupEntries != null ? GetClientVipGroup(player) : null;
+        if (group != null && _groupEntries!.TryGetValue(group, out var cached)) return cached;
 
         try
         {
-            var entries = GetFeatureValue<List<C4EffectEntry>>(player)
-                .Where(e => e.Name.Length > 0 && e.Particle.Length > 0 && e.Defuse == defuse)
-                .ToList();
-            return entries.Count > 0 ? entries : null;
+            var list = GetFeatureValue<JsonElement>(player);
+            List<C4EffectEntry> entries = [];
+            if (list.ValueKind == JsonValueKind.Array)
+                foreach (var item in list.EnumerateArray())
+                    if (ReadEntry(item) is { } entry)
+                        entries.Add(entry);
+            if (group != null) _groupEntries![group] = entries;
+            return entries;
         }
-        catch (Exception)
+        catch (JsonException)
+        {
+            return [];
+        }
+        catch (InvalidOperationException)
+        {
+            return [];
+        }
+        catch (KeyNotFoundException)
+        {
+            return [];
+        }
+    }
+
+    private static C4EffectEntry? ReadEntry(JsonElement item)
+    {
+        if (item.ValueKind != JsonValueKind.Object) return null;
+        try
+        {
+            var entry = item.Deserialize<C4EffectEntry>();
+            return entry != null && !string.IsNullOrEmpty(entry.Name) && !string.IsNullOrEmpty(entry.Particle)
+                ? entry
+                : null;
+        }
+        catch (JsonException)
         {
             return null;
         }
     }
 
-    /// <summary>The effect the player will see for this event, or null if they have none or switched it off.</summary>
-    private C4EffectEntry? Pick(CCSPlayerController? player, bool defuse)
+    private C4EffectEntry? Pick(CCSPlayerController? player, bool defuse, out Prefs? prefs)
     {
-        if (_stopped || player is not { IsValid: true } || player.IsBot) return null;
+        prefs = null;
+        if (_stopped || player is not { IsValid: true, IsBot: false, IsHLTV: false } ||
+            !ValidSlot(player.Slot) || !HasAccess(player)) return null;
 
-        var entries = TryGetEntries(player, defuse);
-        return entries == null ? null : Current(player, entries, defuse);
+        prefs = Load(player);
+        var saved = defuse ? prefs.Defuse : prefs.Plant;
+        return saved == Off ? null : Current(GetEntries(player), saved, defuse);
     }
-
-    // ---- bomb events ------------------------------------------------------------------------
 
     private HookResult OnPlanted(EventBombPlanted ev, GameEventInfo info)
     {
+        var generation = ++_plantGeneration;
+        _bomb = null;
+        RemovePlant();
         var planter = ev.Userid;
-        var entry = Pick(planter, false);
+        var entry = Pick(planter, false, out var prefs);
         if (entry == null) return HookResult.Continue;
 
         var slot = planter!.Slot;
-        var prefs = Load(planter);
-        var mine = prefs.Mine;
+        var connection = _viewers[slot].Connection;
+        var mine = prefs!.Mine;
         var seeOwn = prefs.SeeOwn;
 
-        // The planted bomb entity exists only after the event has been processed.
         Server.NextFrame(() =>
         {
-            if (_stopped) return;
+            if (_stopped || generation != _plantGeneration) return;
+            var bomb = FindBomb();
+            if (bomb?.AbsOrigin is not { } origin) return;
 
-            var c4 = Utilities.FindAllEntitiesByDesignerName<CPlantedC4>("planted_c4")
-                .FirstOrDefault(c => c is { IsValid: true });
-            if (c4?.AbsOrigin == null) return;
-
-            RemovePlant();
-
-            var origin = c4.AbsOrigin;
-            var particle = Spawn(entry.Particle, new Vector(origin.X, origin.Y, origin.Z), c4);
-            if (particle == null) return;
-
-            var spawned = Track(particle, slot, mine, seeOwn);
-            _plant = spawned;
-
-            if (entry.Lifetime > 0)
-                _plugin.AddTimer(entry.Lifetime, () =>
-                {
-                    if (ReferenceEquals(_plant, spawned)) RemovePlant();
-                }, TimerFlags.STOP_ON_MAPCHANGE);
+            _bomb = new CHandle<CPlantedC4>(bomb.EntityHandle.Raw);
+            var particle = Spawn(entry.Particle, new Vector(origin.X, origin.Y, origin.Z), bomb);
+            if (particle != null)
+            {
+                var owner = _viewers[slot].Connection == connection ? slot : -1;
+                _plant = Track(particle, owner, mine, seeOwn, entry.Lifetime);
+            }
+            RefreshListeners();
         });
-
         return HookResult.Continue;
     }
 
     private HookResult OnDefused(EventBombDefused ev, GameEventInfo info)
     {
-        // The plant effect marks where the bomb was; take its position before it is removed.
-        Vector? bombPos = null;
-        if (_plant?.Particle is { IsValid: true, AbsOrigin: { } at })
-            bombPos = new Vector(at.X, at.Y, at.Z);
-
-        if (bombPos == null)
-        {
-            var c4 = Utilities.FindAllEntitiesByDesignerName<CPlantedC4>("planted_c4")
-                .FirstOrDefault(c => c is { IsValid: true });
-            if (c4?.AbsOrigin is { } at2)
-                bombPos = new Vector(at2.X, at2.Y, at2.Z);
-        }
-
-        RemovePlant();
-
+        _plantGeneration++;
+        var bomb = _bomb;
+        _bomb = null;
         var defuser = ev.Userid;
-        var entry = Pick(defuser, true);
-        if (entry == null) return HookResult.Continue;
-
-        if (bombPos == null)
+        var entry = Pick(defuser, true, out var prefs);
+        if (entry == null)
         {
-            var origin = defuser!.PlayerPawn.Value?.AbsOrigin;
-            if (origin == null) return HookResult.Continue;
-            bombPos = new Vector(origin.X, origin.Y, origin.Z);
+            RemovePlant();
+            return HookResult.Continue;
         }
 
-        var particle = Spawn(entry.Particle, new Vector(bombPos.X, bombPos.Y, bombPos.Z + 10f), null);
-        if (particle == null) return HookResult.Continue;
-
-        var prefs = Load(defuser!);
-        var spawned = Track(particle, defuser!.Slot, prefs.Mine, prefs.SeeOwn);
-        _plugin.AddTimer(entry.Lifetime > 0 ? entry.Lifetime : DefaultDefuseLifetime,
-            () => Remove(spawned), TimerFlags.STOP_ON_MAPCHANGE);
-
+        var origin = (_plant is { } plant ? Resolve(plant)?.AbsOrigin : null)
+            ?? bomb?.Value?.AbsOrigin
+            ?? FindBomb()?.AbsOrigin
+            ?? defuser!.PlayerPawn.Value?.AbsOrigin;
+        var position = origin == null ? null : new Vector(origin.X, origin.Y, origin.Z + 10f);
+        if (_plant is { } previous) Remove(previous, refresh: false);
+        if (position != null && Spawn(entry.Particle, position, null) is { } particle)
+            Track(particle, defuser!.Slot, prefs!.Mine, prefs.SeeOwn,
+                entry.Lifetime > 0 ? entry.Lifetime : DefaultDefuseLifetime);
+        RefreshListeners();
         return HookResult.Continue;
     }
 
-    // ---- particle ---------------------------------------------------------------------------
+    private static CPlantedC4? FindBomb()
+    {
+        foreach (var bomb in Utilities.FindAllEntitiesByDesignerName<CPlantedC4>("planted_c4"))
+            if (bomb.IsValid && bomb.DesignerName == "planted_c4") return bomb;
+        return null;
+    }
 
     private static CParticleSystem? Spawn(string effect, Vector position, CBaseEntity? follow)
     {
@@ -482,89 +645,208 @@ public class C4Effect : VipFeatureBase
         if (follow is { IsValid: true })
             particle.AcceptInput("FollowEntity", follow, particle, "!activator");
 
-        return particle;
+        return particle.IsValid ? particle : null;
     }
 
-    private Spawned Track(CParticleSystem particle, int owner, MineMode mine, bool seeOwn)
+    private Spawned Track(CParticleSystem particle, int owner, MineMode mine, bool seeOwn, float lifetime)
     {
-        var spawned = new Spawned { Particle = particle, Owner = owner, Mine = mine, SeeOwn = seeOwn };
+        var handle = new CHandle<CParticleSystem>(particle.EntityHandle.Raw);
+        var spawned = new Spawned(handle, owner, mine, seeOwn);
+        spawned.Hidden = HiddenViewers(spawned);
         _active.Add(spawned);
+        if (lifetime > 0)
+            spawned.Timer = _plugin.AddTimer(lifetime, () => Expire(spawned), TimerFlags.STOP_ON_MAPCHANGE);
         return spawned;
+    }
+
+    private static CParticleSystem? Resolve(Spawned spawned)
+    {
+        var particle = spawned.Handle.Value;
+        return particle is { IsValid: true } ? particle : null;
+    }
+
+    private void Expire(Spawned spawned)
+    {
+        if (spawned.Timer is not { } timer) return;
+        spawned.Timer = null;
+        _plugin.Timers.Remove(timer);
+        Remove(spawned);
     }
 
     private void RemovePlant()
     {
-        var plant = _plant;
-        _plant = null;
-        if (plant != null) Remove(plant);
+        if (_plant is { } plant) Remove(plant);
     }
 
     private void RemoveAll()
     {
-        foreach (var spawned in _active.ToArray())
-            Remove(spawned);
-        _plant = null;
+        while (_active.Count != 0) Remove(_active[^1], refresh: false);
+        RefreshListeners();
     }
 
-    private void Remove(Spawned spawned)
+    private bool Detach(Spawned spawned)
     {
-        _active.Remove(spawned);
-
-        var particle = spawned.Particle;
-        if (!particle.IsValid || particle.DesignerName != "info_particle_system") return;
-
-        particle.AcceptInput("DestroyImmediately");
-        if (particle.IsValid) particle.Remove();
+        if (!_active.Remove(spawned)) return false;
+        if (ReferenceEquals(_plant, spawned)) _plant = null;
+        if (spawned.Timer is { } timer)
+        {
+            spawned.Timer = null;
+            timer.Kill();
+            _plugin.Timers.Remove(timer);
+        }
+        return true;
     }
 
-    // ---- visibility -------------------------------------------------------------------------
+    private void Remove(Spawned spawned, bool refresh = true)
+    {
+        if (!Detach(spawned)) return;
+        if (Resolve(spawned) is { } particle)
+        {
+            particle.AcceptInput("DestroyImmediately");
+            Resolve(spawned)?.Remove();
+        }
+        if (refresh) RefreshListeners();
+    }
 
-    /// <summary>Strips effects from each viewer's snapshot according to both visibility settings.</summary>
+    private void OnEntityDeleted(CEntityInstance entity)
+    {
+        if (_active.Count == 0) return;
+        var handle = entity.EntityHandle.Raw;
+        for (var i = 0; i < _active.Count; i++)
+        {
+            if (_active[i].Handle.Raw != handle) continue;
+            Detach(_active[i]);
+            // Keep iteration of CSS's native deletion listeners intact.
+            RefreshListeners(fromDeletion: true);
+            return;
+        }
+    }
+
+    private void UpdateViewer(CCSPlayerController player, int team, Prefs? prefs = null, bool replacePrefs = false)
+    {
+        var slot = player.Slot;
+        if (_stopped || !ValidSlot(slot)) return;
+        var bit = 1UL << slot;
+        // Fake players do not receive snapshots. An HLTV relay can also carry the fake-client flag.
+        if (player.IsBot && !player.IsHLTV)
+        {
+            if ((_present & bit) != 0) ForgetViewer(slot);
+            return;
+        }
+        var handle = player.EntityHandle.Raw;
+        ref var viewer = ref _viewers[slot];
+        if ((_present & bit) == 0 || viewer.Controller != handle)
+        {
+            ClearViewer(slot);
+            viewer.Controller = handle;
+            viewer.Connection = ++_connection;
+            _present |= bit;
+        }
+        viewer.Team = team;
+        if (replacePrefs) viewer.Prefs = prefs;
+        RefreshViewer(slot);
+    }
+
+    private void ClearViewer(int slot)
+    {
+        _viewers[slot] = default;
+        _present &= ~(1UL << slot);
+        foreach (var spawned in _active)
+            if (spawned.Owner == slot)
+            {
+                spawned.Owner = -1;
+                spawned.Hidden = HiddenViewers(spawned);
+            }
+    }
+
+    private void ForgetViewer(int slot)
+    {
+        if (!ValidSlot(slot)) return;
+        ClearViewer(slot);
+        RefreshViewer(slot);
+    }
+
+    private void RefreshViewer(int slot)
+    {
+        var bit = 1UL << slot;
+        foreach (var spawned in _active)
+        {
+            if (spawned.Owner == slot)
+                spawned.Hidden = HiddenViewers(spawned);
+            else if ((_present & bit) != 0 && !CanSee(slot, spawned))
+                spawned.Hidden |= bit;
+            else
+                spawned.Hidden &= ~bit;
+        }
+        RefreshListeners();
+    }
+
+    private ulong HiddenViewers(Spawned spawned)
+    {
+        ulong hidden = 0;
+        for (var present = _present; present != 0; present &= present - 1)
+        {
+            var slot = System.Numerics.BitOperations.TrailingZeroCount(present);
+            if (!CanSee(slot, spawned)) hidden |= 1UL << slot;
+        }
+        return hidden;
+    }
+
+    private bool CanSee(int viewer, Spawned spawned)
+    {
+        if (viewer == spawned.Owner) return spawned.SeeOwn;
+        var others = _viewers[viewer].Prefs?.Others ?? OthersMode.All;
+        if (spawned.Mine == MineMode.Self || others == OthersMode.None) return false;
+        if (spawned.Mine != MineMode.Team && others != OthersMode.Team) return true;
+        var team = _viewers[viewer].Team;
+        return spawned.Owner >= 0 && team > 1 && team == _viewers[spawned.Owner].Team;
+    }
+
+    private void RefreshListeners(bool fromDeletion = false)
+    {
+        _hidden = 0;
+        foreach (var spawned in _active)
+            _hidden |= spawned.Hidden;
+        var transmit = _hidden != 0;
+        if (_transmitRegistered != transmit)
+        {
+            if (transmit) _plugin.RegisterListener<Listeners.CheckTransmit>(OnCheckTransmit);
+            else _plugin.RemoveListener<Listeners.CheckTransmit>(OnCheckTransmit);
+            _transmitRegistered = transmit;
+        }
+
+        var watchDeletion = _active.Count != 0;
+        if (_deleteRegistered == watchDeletion) return;
+        if (fromDeletion)
+        {
+            if (_deleteSyncPending) return;
+            _deleteSyncPending = true;
+            Server.NextWorldUpdate(() =>
+            {
+                _deleteSyncPending = false;
+                if (!_stopped) RefreshListeners();
+            });
+            return;
+        }
+        if (watchDeletion) _plugin.RegisterListener<Listeners.OnEntityDeleted>(OnEntityDeleted);
+        else _plugin.RemoveListener<Listeners.OnEntityDeleted>(OnEntityDeleted);
+        _deleteRegistered = watchDeletion;
+    }
+
     private void OnCheckTransmit(CCheckTransmitInfoList infoList)
     {
-        if (_stopped || _active.Count == 0) return;
-
-        Array.Clear(_team);
-        foreach (var player in Utilities.GetPlayers())
-            if (player.Slot < MaxPlayers)
-                _team[player.Slot] = player.TeamNum;
-
-        foreach (var (info, viewer) in infoList)
+        var count = infoList.Count;
+        for (var i = 0; i < count; i++)
         {
-            if (viewer is not { IsValid: true } || viewer.Slot >= MaxPlayers) continue;
-
-            var viewerPrefs = _prefs.GetValueOrDefault(viewer.Slot);
+            var (info, viewer) = infoList[i];
+            if (viewer is not { IsValid: true }) continue;
+            var slot = viewer.Slot;
+            if (!ValidSlot(slot)) continue;
+            var bit = 1UL << slot;
+            if ((_hidden & bit) == 0) continue;
             foreach (var spawned in _active)
-            {
-                var particle = spawned.Particle;
-                if (!particle.IsValid) continue;
-
-                var owner = spawned.Owner;
-                if (owner == viewer.Slot)
-                {
-                    if (!spawned.SeeOwn)
-                        info.TransmitEntities.Remove((int)particle.Index);
-                    continue;
-                }
-
-                var sameTeam = owner >= 0 && _team[owner] > 1 && _team[owner] == _team[viewer.Slot];
-
-                var ownerAllows = spawned.Mine switch
-                {
-                    MineMode.Team => sameTeam,
-                    MineMode.Self => false,
-                    _ => true
-                };
-                var viewerAllows = viewerPrefs?.Others switch
-                {
-                    OthersMode.Team => sameTeam,
-                    OthersMode.None => false,
-                    _ => true
-                };
-
-                if (!ownerAllows || !viewerAllows)
-                    info.TransmitEntities.Remove((int)particle.Index);
-            }
+                if ((spawned.Hidden & bit) != 0)
+                    info.TransmitEntities.Remove(spawned.Index);
         }
     }
 }
